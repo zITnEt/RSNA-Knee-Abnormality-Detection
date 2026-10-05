@@ -19,6 +19,8 @@ The published V10 run's optional ConvNeXt arm failed closed because its manifest
 The `codex/raptor-v5-radimagenet-fusion` branch adds a trainable model in
 `models/raptor_v5_radimagenet.py` with residual concatenation-MLP fusion of
 RadImageNet conv3_x/conv5_x into CoAtNet Stage2/Stage4. Both backbones receive
-the same 384×384 triplet and remain unfrozen. See
+the same 384×384 triplet and remain unfrozen. `raptor_data/series_triplets.py`
+keeps every triplet within one MRI series while preserving the dense triplet
+count, sampling extra slices when available. See
 [the model guide](docs/RAPTOR_V5_RADIMAGENET.md) and the self-contained
 `kaggle/raptor_v5_radimagenet_fusion.ipynb` for checkpoint loading and usage.

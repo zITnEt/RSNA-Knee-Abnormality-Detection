@@ -21,12 +21,15 @@ Both unfrozen backbones receive the same preprocessed 384×384 adjacent-slice
 triplet. CoAtNet S2 uses `Z + F1(X,Z)`; S4 uses `V + F2(V,Y)`.
 Both MLP corrections initialize to exactly zero. The original Raptor MIL head
 continues after CoAtNet pooling. This notebook builds the architecture and
-optimizer; use the existing Raptor training loader to train it.
+optimizer and a series-aware loader. Use this loader to train it; anonymous
+concatenated slice caches cannot enforce MRI series boundaries.
 
 Attach `dreaddevelopment/raptor-knee-maxspan`,
 `marwanmath/resnet-50-radimagenet-marwan`, and a `timm-1.0.22` wheel if your
 runtime does not already have that version. Attach the existing training
-corpus/labels for training. No checkpoint or competition data downloads occur.
+competition series and labels for training. No checkpoint or competition data
+downloads occur. Dense eval preserves the parent's per-study triplet count
+(usually 94), using up to 104 sampled slices across five series.
 """), cell("code", """import importlib.metadata
 import subprocess
 import sys
@@ -43,6 +46,7 @@ if timm_version != '1.0.22':
     subprocess.check_call([sys.executable, '-m', 'pip', 'install',
                            '--no-index', '--no-deps', str(wheels[0])])
 """), cell("code", (ROOT / "models/raptor_v5_radimagenet.py").read_text(encoding="utf-8")),
+        cell("code", (ROOT / "raptor_data/series_triplets.py").read_text(encoding="utf-8")),
         cell("code", """import hashlib
 
 def attached_asset(relative_paths):
@@ -73,8 +77,26 @@ optimizer = torch.optim.AdamW(optimizer_groups(model), weight_decay=0.01)
 print('Parameters:', sum(p.numel() for p in model.parameters()))
 print('Trainable:', sum(p.numel() for p in model.parameters() if p.requires_grad))
 print('Optimizer groups:', [(g['name'], g['lr']) for g in optimizer.param_groups])
-"""), cell("code", """# Connect this step to your existing loader; it must yield [B,K,3,384,384].
-# Apply the shared Raptor preprocessing/normalization ONCE in that loader.
+"""), cell("code", """import pandas as pd
+
+def make_series_loader(series_csv, series_root, ids, labels=None, *, train=False, k=12):
+    # Preserve your existing train/validation study split and label mapping.
+    frame = pd.read_csv(series_csv, dtype={'StudyInstanceUID': str, 'SeriesInstanceUID': str})
+    series = {uid: group.to_dict('records') for uid, group in frame.groupby('StudyInstanceUID')}
+    dataset = SeriesTripletDataset(ids, series, series_root, labels,
+                                  train=train, k=k, eval_k=None, norm='imagenet')
+    # Eval K is the historical per-study count and can vary for sparse studies.
+    # batch_size=1 handles that and bounds memory for two unfrozen backbones.
+    return torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=train, num_workers=0)
+
+# Example with your existing split IDs and label dict (12 targets per study):
+# train_loader = make_series_loader(COMP_ROOT/'train_series.csv', COMP_ROOT/'train_images',
+#                                   train_ids, labels, train=True, k=12)
+# val_loader = make_series_loader(COMP_ROOT/'train_series.csv', COMP_ROOT/'train_images',
+#                                 val_ids, labels, train=False)
+# Each channel is a distinct acquired slice from one SeriesInstanceUID.
+"""), cell("code", """# Use the series-aware loader above; it yields [B,K,3,384,384].
+# Shared preprocessing/normalization is applied ONCE by that loader.
 use_amp = device.type == 'cuda'
 amp_dtype = (torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported()
              else torch.float16)

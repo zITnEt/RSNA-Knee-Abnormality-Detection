@@ -71,7 +71,7 @@ model = build_raptor_v5_radimagenet(
 ).cuda().train()
 optimizer = torch.optim.AdamW(optimizer_groups(model), weight_decay=0.01)
 
-# Use the existing Raptor loader, with its output triplets set to 384×384.
+# Use SeriesTripletDataset from raptor_data.series_triplets (see below).
 # triplets: float tensor [B,K,3,384,384]; targets: float tensor [B,12].
 optimizer.zero_grad(set_to_none=True)
 logits = model(triplets.cuda())
@@ -100,16 +100,71 @@ checkpointing and checkpoints the fusion MLPs. RadImageNet remains a normal
 trainable forward pass. Use a small bag/batch size appropriate for GPU memory.
 
 The self-contained `kaggle/raptor_v5_radimagenet_fusion.ipynb` embeds the same
-model module and verifies both parent files by the baseline manifest's Rad
-SHA-256 and the expected Raptor path. It builds the model and optimizer; supply
-the existing training loader to start an experiment. No training run or new
+model and series-aware loader modules, and verifies both parent files by the
+baseline manifest's Rad SHA-256 and the expected Raptor path. It builds the
+model and optimizer; use `make_series_loader` with existing split IDs/labels
+to start an experiment. No training run or new
 accuracy result is claimed by this branch.
+
+## Series-aware triplets
+
+The parent dense inference path in baseline cell 22 selects up to 96 unique
+source slices across five series, concatenates them, and slides a three-slice
+window over the concatenation. It produces `min(96, total_capacity)-2`
+triplets: usually 94. For five nonempty series of sufficient length, two
+windows at each of the four boundaries mix series (eight windows in total).
+The earlier nominal 64-slice/62-triplet arm constants are superseded by this
+dense preparation function. The published training script has a separate K:
+12 by default, and an older evaluation default of 24; K is not built into
+the classifier. The new dataset keeps the supplied training K unchanged.
+
+`raptor_data/series_triplets.py` retains the five-slot selection, 2–98% source
+band, series intensity reference, 140mm center crop, and shared normalization,
+but allocates **triplets per series before sampling slices**. A series assigned
+q triplets supplies q+2 unique ordered slices. All triplets are constructed
+locally in that series. For 94 unique triplets across five used series, this
+requires 104 sampled slices; with S used series, it requires 94+2S. Allocations
+redistribute to series with available capacity.
+
+If there are not enough acquired slices, it repeats complete valid triplets
+to preserve the parent's per-study count and records the repetition count in
+the audit. Each repeated triplet still has three distinct acquired slices
+from one series. `shortage="error"` forbids repetition. A study with no series
+containing at least three acquired slices raises an error. No cross-series
+or synthetic padding triplets are permitted.
+
+```python
+from raptor_data.series_triplets import SeriesTripletDataset
+
+# series_by_study: study UID -> records from train_series.csv/test_series.csv
+train_dataset = SeriesTripletDataset(
+    train_ids, series_by_study, series_root, labels,
+    train=True, k=12, norm="imagenet",
+)
+eval_dataset = SeriesTripletDataset(
+    val_ids, series_by_study, series_root, labels,
+    train=False, eval_k=None, norm="imagenet",
+)
+triplets, audit = eval_dataset.load(0)
+# audit includes every triplet's series UID and three source file paths.
+```
+
+Training selects K unique safe candidate triplets without replacement when
+available. Evaluation defaults to the parent's per-study count; use batch size
+one for variable-length bags. Triplets use adjacent **sampled** slices in
+physical order, as in Raptor, rather than necessarily consecutive native
+DICOM slice numbers. The two encoders receive the same resulting tensor.
+The existing anonymous `all_vols.npy` corpus does not provide series identities
+to its loader; use raw DICOM series or rebuild a cache retaining per-slice
+SeriesInstanceUID and physical-order provenance. Do not guess those boundaries.
 
 ## Validation
 
 ```powershell
 python -m unittest discover -s tests -p test_raptor_v5_radimagenet.py -v
 python -m unittest discover -s tests -p test_raptor_real_backbones.py -v
+python -m unittest discover -s tests -p test_series_triplets.py -v
+python -m unittest discover -s tests -p test_series_dicom_reader.py -v
 ```
 
 The first suite checks ordered concatenation, zero residuals, shared input,
@@ -120,6 +175,12 @@ real 384×384 map sizes, exact initial parent-logit equality, equivalence to the
 MIL class extracted from the baseline notebook, both backbone gradients, and
 strict fused checkpoint roundtrip. It does not download medical images or
 pretrained checkpoint files.
+
+Sampler checks include 100 randomized capacity layouts, five-series
+104-slice/94-triplet cardinality, sparse-study count preservation, strict
+shortage handling, source file ownership for every channel, and training K.
+Generated DICOM files verify physical ordering, modality rescaling, rejection
+of foreign series headers, and duplicate acquired slice detection.
 
 Source references: the preserved baseline notebook's cell 22 (`_KE_SRC`,
 `RaptorClassifier`) and `_RadEncoder`; [timm 1.0.22 CoAtNet implementation](https://github.com/huggingface/pytorch-image-models/blob/v1.0.22/timm/models/maxxvit.py);
