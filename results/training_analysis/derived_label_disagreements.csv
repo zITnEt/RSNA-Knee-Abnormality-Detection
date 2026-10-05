@@ -1,0 +1,13 @@
+finding,derived_positive_gold_negative,derived_negative_gold_positive
+ACL,9,1
+MCL,9,0
+Medial Meniscus,7,1
+Lateral Meniscus,10,3
+Medial OA,8,1
+Lateral OA,7,2
+PF OA,8,5
+Effusion,16,1
+Synovitis,3,14
+Baker's,5,1
+Contusion,20,3
+Fracture,6,5

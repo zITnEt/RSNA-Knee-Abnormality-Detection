@@ -1,0 +1,34 @@
+# Secrets
+.kaggle/
+kaggle.json
+*.token
+
+# Competition data and model artifacts
+data/
+datasets/
+*.dcm
+*.dicom
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.npz
+
+# Generated caches and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.cache/
+audit/
+
+# Keep the validated baseline CSV once produced.
+results/dinosaur_v5_baseline/*
+!results/dinosaur_v5_baseline/.gitkeep
+!results/dinosaur_v5_baseline/submission.csv
+!results/dinosaur_v5_baseline/submission_validation.txt
+!results/dinosaur_v5_baseline/run_metadata.json
+!results/dinosaur_v5_baseline/environment.txt
+!results/dinosaur_v5_baseline/reproduction_notes.md
