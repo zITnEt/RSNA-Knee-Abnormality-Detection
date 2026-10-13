@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 from raptor_data.series_triplets import (
-    SLOTS, SeriesTripletDataset, plan_triplets, prepare_study_triplets,
+    SLOTS, SeriesTripletDataset, balanced_slot_quotas, plan_triplets,
+    prepare_study_triplets,
 )
 
 
@@ -117,6 +118,54 @@ class SeriesTripletTests(unittest.TestCase):
             used_series = sum(bool(indices) for indices in plan.sampled_indices)
             self.assertEqual(plan.source_count, plan.unique_triplets+2*used_series)
             self.assertEqual(plan.target_triplets, min(96, sum(capacities))-2)
+
+    def test_balanced_quotas_split_k_evenly_with_random_remainder(self):
+        gen = torch.Generator().manual_seed(0)
+        extras = [0]*5
+        for _ in range(200):
+            quotas = balanced_slot_quotas([20, 18, 15, 12, 10], 24, gen)
+            self.assertEqual(sum(quotas), 24)
+            self.assertTrue(all(q in (4, 5) for q in quotas))
+            for s, q in enumerate(quotas):
+                extras[s] += q == 5
+        self.assertTrue(all(e > 0 for e in extras))  # remainder rotates over slots
+
+    def test_balanced_quotas_skip_empty_and_redistribute_small_slots(self):
+        self.assertEqual(balanced_slot_quotas([0, 30, 30, 0], 24), [0, 12, 12, 0])
+        self.assertEqual(balanced_slot_quotas([2, 100, 100], 24), [2, 11, 11])
+        quotas = balanced_slot_quotas([1, 3, 100], 24)
+        self.assertEqual(quotas[:2], [1, 3])
+        self.assertEqual(quotas[2], 20)
+
+    def test_balanced_quotas_spread_repeats_when_study_is_short(self):
+        quotas = balanced_slot_quotas([3, 2], 24)
+        self.assertEqual(sum(quotas), 24)
+        self.assertEqual(sorted(quotas), [12, 12])
+        # A slot holding more unique windows than K/n keeps all of them.
+        self.assertEqual(balanced_slot_quotas([15, 1], 24), [15, 9])
+        for bad in [([0, 0], 24), ([5], 0), ([-1, 5], 4)]:
+            with self.assertRaises(ValueError):
+                balanced_slot_quotas(*bad)
+
+    def test_training_k24_is_balanced_across_series_slots(self):
+        rows = [dict(SeriesInstanceUID="sag", Anatomical_Plane="Sagittal", Fluid_Sensitive=1),
+                dict(SeriesInstanceUID="cor", Anatomical_Plane="Coronal", Fluid_Sensitive=1),
+                dict(SeriesInstanceUID="ax", Anatomical_Plane="Axial", Fluid_Sensitive=0)]
+        dataset = SeriesTripletDataset(["study"], {"study": rows}, "root",
+                                       {"study": [0.0]*12}, train=True, norm="none", aug=False)
+        self.assertEqual(dataset.k, 24)
+        with patch("raptor_data.series_triplets.dicom_reader", return_value=self.synthetic_reader()):
+            for _ in range(5):
+                windows, audit = dataset.load(0)
+                self.assertEqual(tuple(windows.shape), (24, 3, 384, 384))
+                counts = {uid: audit["window_series_uids"].count(uid) for uid in ("sag", "cor", "ax")}
+                self.assertEqual(counts, {"sag": 8, "cor": 8, "ax": 8})
+                self.assertEqual(sorted(audit["slot_quotas"].values()), [8, 8, 8])
+                self.assertEqual(audit["repeated_triplets"], 0)
+                for slot, uid, files in zip(audit["window_slots"], audit["window_series_uids"],
+                                            audit["window_source_files"]):
+                    self.assertEqual(audit["series_uids"][slot], uid)
+                    self.assertEqual({Path(f).parent.name for f in files}, {uid})
 
 
 if __name__ == "__main__":

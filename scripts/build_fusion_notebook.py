@@ -78,7 +78,7 @@ print('Trainable:', sum(p.numel() for p in model.parameters() if p.requires_grad
 print('Optimizer groups:', [(g['name'], g['lr']) for g in optimizer.param_groups])
 """), cell("code", """import pandas as pd
 
-def make_series_loader(series_csv, series_root, ids, labels=None, *, train=False, k=12):
+def make_series_loader(series_csv, series_root, ids, labels=None, *, train=False, k=24):
     # Preserve your existing train/validation study split and label mapping.
     frame = pd.read_csv(series_csv, dtype={'StudyInstanceUID': str, 'SeriesInstanceUID': str})
     series = {uid: group.to_dict('records') for uid, group in frame.groupby('StudyInstanceUID')}
@@ -90,7 +90,8 @@ def make_series_loader(series_csv, series_root, ids, labels=None, *, train=False
 
 # Example with your existing split IDs and label dict (12 targets per study):
 # train_loader = make_series_loader(COMP_ROOT/'train_series.csv', COMP_ROOT/'train_images',
-#                                   train_ids, labels, train=True, k=12)
+#                                   train_ids, labels, train=True, k=24)
+# Training K=24 is split evenly over the populated series slots (~K/n each).
 # val_loader = make_series_loader(COMP_ROOT/'train_series.csv', COMP_ROOT/'train_images',
 #                                 val_ids, labels, train=False)
 # Each channel is a distinct acquired slice from one SeriesInstanceUID.

@@ -151,7 +151,7 @@ from raptor_data.series_triplets import SeriesTripletDataset
 # series_by_study: study UID -> records from train_series.csv/test_series.csv
 train_dataset = SeriesTripletDataset(
     train_ids, series_by_study, series_root, labels,
-    train=True, k=12, norm="imagenet",
+    train=True, k=24, norm="imagenet",
 )
 eval_dataset = SeriesTripletDataset(
     val_ids, series_by_study, series_root, labels,
@@ -161,9 +161,17 @@ triplets, audit = eval_dataset.load(0)
 # audit includes every triplet's series UID and three source file paths.
 ```
 
-Training selects K unique safe candidate triplets without replacement when
-available. Evaluation defaults to the parent's per-study count; use batch size
-one for variable-length bags. Triplets use adjacent **sampled** slices in
+Training selects K = 24 triplets, balanced over series slots: with n
+populated slots, each slot gets floor(K/n) or ceil(K/n) windows (the K mod n
+extras go to randomly chosen slots each step), drawn uniformly at random and
+without replacement inside the slot. A slot with fewer unique windows than its
+share passes the deficit evenly to slots with spare windows. Windows repeat
+only when the whole study has fewer than K unique candidates; those repeats
+go to the smallest slots first, keeping the split as close to K/n as possible.
+The audit records `slot_quotas` and each window's slot in `window_slots`.
+
+Evaluation defaults to the parent's per-study count; use batch size one for
+variable-length bags. Triplets use adjacent **sampled** slices in
 physical order, as in Raptor, rather than necessarily consecutive native
 DICOM slice numbers. The two encoders receive the same resulting tensor.
 The existing anonymous `all_vols.npy` corpus does not provide series identities

@@ -238,14 +238,62 @@ def prepare_study_triplets(study_uid: str, series_rows, series_root,
              "repeated_triplets": plan.repeated_triplets,
              "sampled_slices": plan.source_count, "decoded_slices": len(set(decoded_files)),
              "series_uids": uids, "sampled_slices_per_series": [len(x) for x in plan.sampled_indices],
+             "window_slots": [spec.slot for spec in plan.triplets],
              "window_series_uids": [spec.series_uid for spec in plan.triplets],
              "window_source_files": [[str(pools[spec.slot][0][pools[spec.slot][2]+i][0])
                                       for i in spec.indices] for spec in plan.triplets]}
     return tensor, audit
 
 
+def balanced_slot_quotas(counts, k, generator=None):
+    """Split K training windows as evenly as possible over populated slots.
+
+    `counts[s]` is the number of unique candidate windows in slot s. Each of
+    the n populated slots gets floor(K/n) or ceil(K/n); the K mod n extra
+    windows go to randomly chosen slots. A slot with fewer unique windows than
+    its share gives the deficit to slots with spare windows, again evenly.
+    Only when the whole study has fewer than K unique windows do quotas exceed
+    counts; those repeats go to the smallest slots first, so the final split
+    is as close to K/n per slot as the unique windows allow.
+    """
+    counts = [int(c) for c in counts]
+    if any(c < 0 for c in counts) or not isinstance(k, int) or k < 1:
+        raise ValueError("Expected nonnegative slot counts and a positive K")
+    populated = [s for s, c in enumerate(counts) if c > 0]
+    if not populated:
+        raise ValueError("No slot has a candidate window")
+    quotas = [0] * len(counts)
+
+    def spread(total, slots, limit):
+        # Round-robin over a random slot order, skipping slots at their limit.
+        order = [slots[i] for i in torch.randperm(len(slots), generator=generator).tolist()]
+        while total > 0:
+            open_slots = [s for s in order if limit(s)]
+            if not open_slots:
+                return total
+            for s in open_slots[:total]:
+                quotas[s] += 1
+            total -= min(total, len(open_slots))
+        return 0
+
+    left = spread(min(k, sum(counts)), populated, lambda s: quotas[s] < counts[s])
+    assert left == 0
+    # Short study: every unique window is already used. Water-fill repeats
+    # into the currently smallest slots so the final split is as even as
+    # possible (ties broken randomly).
+    for _ in range(k - sum(quotas)):
+        low = min(quotas[s] for s in populated)
+        ties = [s for s in populated if quotas[s] == low]
+        quotas[ties[int(torch.randint(len(ties), (), generator=generator))]] += 1
+    return quotas
+
+
 class SeriesTripletDataset(Dataset):
     """Training K stays fixed; eval defaults to the parent's per-study dense K.
+
+    Training draws K windows from the dense candidates, about K/n from each of
+    the n populated series slots (see balanced_slot_quotas), uniformly at
+    random within each slot.
 
     `series` maps study UIDs to rows from train_series.csv/test_series.csv.
     Anonymous all_vols.npy stacks cannot enforce SeriesInstanceUID ownership;
@@ -253,7 +301,7 @@ class SeriesTripletDataset(Dataset):
     """
 
     def __init__(self, ids, series, series_root, labels=None, *, train=False,
-                 k=12, eval_k=None, norm="imagenet", aug=True, shortage="repeat"):
+                 k=24, eval_k=None, norm="imagenet", aug=True, shortage="repeat"):
         self.ids, self.series, self.series_root, self.labels = ids, series, series_root, labels
         self.train, self.k, self.eval_k = train, k, eval_k
         self.norm, self.aug, self.shortage = norm, aug, shortage
@@ -280,19 +328,29 @@ class SeriesTripletDataset(Dataset):
                                           target_triplets=self.eval_k, norm="none",
                                           shortage=self.shortage, reader=self.reader)
         if self.train:
+            # Unique candidate windows, grouped by series slot.
             first_positions = {}
             for i, paths in enumerate(audit["window_source_files"]):
                 first_positions.setdefault(tuple(paths), i)
-            candidates = torch.tensor(list(first_positions.values()))
-            if self.shortage == "error" and self.k > len(candidates):
+            by_slot = {}
+            for i in first_positions.values():
+                by_slot.setdefault(audit["window_slots"][i], []).append(i)
+            if self.shortage == "error" and self.k > len(first_positions):
                 raise ValueError("Insufficient training triplets without repetition")
-            if self.k <= len(candidates):
-                selected = candidates[torch.randperm(len(candidates))[:self.k]]
-            else:
-                selected = torch.cat([candidates[torch.randperm(len(candidates))]
-                                      for _ in range((self.k+len(candidates)-1)//len(candidates))])[:self.k]
+            slots = sorted(by_slot)
+            quotas = balanced_slot_quotas([len(by_slot[s]) for s in slots], self.k)
+            picks = []
+            for slot, quota in zip(slots, quotas):
+                pool = torch.tensor(by_slot[slot])
+                # Without replacement inside a slot; whole-pool cycles only
+                # if the study has fewer than K unique windows overall.
+                rounds = (quota + len(pool) - 1) // len(pool)
+                picks.append(torch.cat([pool[torch.randperm(len(pool))]
+                                        for _ in range(rounds)])[:quota])
+            selected = torch.cat(picks)
             x = x[selected]
-            for key in ("window_series_uids", "window_source_files"):
+            audit["slot_quotas"] = {int(s): int(q) for s, q in zip(slots, quotas)}
+            for key in ("window_slots", "window_series_uids", "window_source_files"):
                 audit[key] = [audit[key][i] for i in selected.tolist()]
             audit["candidate_triplets"] = audit["triplets"]
             audit["triplets"] = self.k
