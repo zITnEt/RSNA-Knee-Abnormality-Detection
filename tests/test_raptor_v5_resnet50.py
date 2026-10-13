@@ -90,13 +90,59 @@ class FusionTests(unittest.TestCase):
         self.assertTrue(torch.equal(changed, expected))
 
     def test_default_fusion_sizes(self):
-        f1, f2 = BottleneckFusion(512, 256, 256, 128), BottleneckFusion(1024, 2048, 1024, 256)
         count = lambda m: sum(p.numel() for p in m.parameters())
+        f1, f2 = BottleneckFusion(512, 256, 256, 128), BottleneckFusion(1024, 2048, 1024, 256)
         # LNs + 1x1 down + depthwise 3x3 + 1x1 up
         self.assertEqual(count(f1), 1536 + 98432 + 1280 + 33024)      # 134,272
         self.assertEqual(count(f2), 6144 + 786688 + 2560 + 263168)    # 1,058,560
+        g1 = BottleneckFusion(512, 256, 256, 128, gate_hidden=64)
+        g2 = BottleneckFusion(1024, 2048, 1024, 256, gate_hidden=128)
+        # Gate MLPs: 768 -> 64 -> 256 and 3072 -> 128 -> 1024
+        self.assertEqual(count(g1.gate), 49216 + 16640)               # 65,856
+        self.assertEqual(count(g2.gate), 393344 + 132096)             # 525,440
+        self.assertEqual(count(g1) + count(g2), 1784128)
         config = FusionConfig()
         self.assertEqual((config.stage2_hidden, config.stage4_hidden), (128, 256))
+        self.assertEqual((config.stage2_gate_hidden, config.stage4_gate_hidden), (64, 128))
+
+    def test_channel_gate_scales_each_channel_of_the_residual(self):
+        fusion = BottleneckFusion(6, 3, 4, 8, gate_hidden=5).eval()
+        nn.init.normal_(fusion.up.weight)
+        a, b = torch.randn(2, 6, 5, 5), torch.randn(2, 3, 5, 5)
+        gates, ungated = [], []
+        handles = [fusion.gate.register_forward_hook(lambda m, i, out: gates.append(out)),
+                   fusion.up.register_forward_hook(lambda m, i, out: ungated.append(out))]
+        with torch.no_grad():
+            out = fusion(a, b)
+        for handle in handles:
+            handle.remove()
+        g = gates[0]
+        self.assertEqual(tuple(g.shape), (2, 4))  # one gate per sample and channel
+        self.assertTrue(bool(((g > 0) & (g < 1)).all()))
+        torch.testing.assert_close(out, ungated[0] * g[:, :, None, None])
+        self.assertFalse(torch.allclose(g[0], g[1]))  # conditioned on the input
+        # The gate sees spatially pooled, separately normalized inputs.
+        pooled = torch.cat((nn.functional.layer_norm(a.permute(0, 2, 3, 1), (6,)),
+                            nn.functional.layer_norm(b.permute(0, 2, 3, 1), (3,))), -1).mean((1, 2))
+        torch.testing.assert_close(g, fusion.gate(pooled))
+
+    def test_gate_hidden_zero_disables_gating(self):
+        gated = BottleneckFusion(6, 3, 4, 8, gate_hidden=5).eval()
+        nogate = BottleneckFusion(6, 3, 4, 8, gate_hidden=0).eval()
+        self.assertIsNone(nogate.gate)
+        nn.init.normal_(gated.up.weight)
+        branch = {k: v for k, v in gated.state_dict().items() if not k.startswith("gate.")}
+        nogate.load_state_dict(branch, strict=True)
+        ungated = []
+        handle = gated.up.register_forward_hook(lambda m, i, out: ungated.append(out))
+        a, b = torch.randn(1, 6, 5, 5), torch.randn(1, 3, 5, 5)
+        with torch.no_grad():
+            gated(a, b)
+            out = nogate(a, b)
+        handle.remove()
+        torch.testing.assert_close(out, ungated[0], rtol=0, atol=0)  # g = 1
+        with self.assertRaises(ValueError):
+            BottleneckFusion(6, 3, 4, 8, gate_hidden=-1)
 
     def test_zero_residuals_preserve_parent_logits(self):
         model = self.make_model().eval()
@@ -109,13 +155,14 @@ class FusionTests(unittest.TestCase):
     def test_shared_input_and_stage2_continuation(self):
         model = self.make_model().eval()
         bb = model.backbone
-        inputs, stage2, stage3, fusion_inputs = [], [], [], []
+        inputs, stage2, stage3, fusion_inputs, gates = [], [], [], [], []
         handles = [
             bb.resnet50.register_forward_pre_hook(lambda m, a: inputs.append(a[0])),
             bb.coatnet.stem.register_forward_pre_hook(lambda m, a: inputs.append(a[0])),
             bb.coatnet.stages[1].register_forward_hook(lambda m, a, out: stage2.append(out)),
             bb.coatnet.stages[2].register_forward_pre_hook(lambda m, a: stage3.append(a[0])),
             bb.f1.register_forward_pre_hook(lambda m, a: fusion_inputs.append(a)),
+            bb.f1.gate.register_forward_hook(lambda m, a, out: gates.append(out)),
         ]
         # Three distinct slice channels must reach BOTH trunks unchanged.
         triplets = torch.stack([torch.full((384, 384), float(i))
@@ -128,25 +175,28 @@ class FusionTests(unittest.TestCase):
             handle.remove()
         self.assertIs(inputs[0], inputs[1])
         torch.testing.assert_close(inputs[0], triplets.flatten(0, 1), rtol=0, atol=0)
-        torch.testing.assert_close(stage3[0], stage2[0] + 0.25)
+        # The gated correction g1 * 0.25 (per channel) reaches stage 3.
+        torch.testing.assert_close(stage3[0], stage2[0] + 0.25 * gates[0][:, :, None, None])
         self.assertEqual(fusion_inputs[0][0].shape[1], 512)  # X first
         self.assertIs(fusion_inputs[0][1], stage2[0])  # Z second
 
     def test_stage4_continues_through_norm_pool_and_head(self):
         model = self.make_model().eval()
         bb = model.backbone
-        v, normalized_input = [], []
+        v, normalized_input, gates = [], [], []
         handles = [
             bb.coatnet.stages[3].register_forward_hook(lambda m, a, out: v.append(out)),
             bb.coatnet.norm.register_forward_pre_hook(lambda m, a: normalized_input.append(a[0])),
+            bb.f2.gate.register_forward_hook(lambda m, a, out: gates.append(out)),
         ]
         with torch.no_grad():
             bb.f2.up.bias.fill_(0.5)
             feats = model.encode(torch.randn(2, 3, 3, 384, 384))
         for handle in handles:
             handle.remove()
-        torch.testing.assert_close(normalized_input[0], v[0] + 0.5)
-        torch.testing.assert_close(feats.flatten(0, 1), (v[0] + 0.5).mean((2, 3)))
+        expected = v[0] + 0.5 * gates[0][:, :, None, None]
+        torch.testing.assert_close(normalized_input[0], expected)
+        torch.testing.assert_close(feats.flatten(0, 1), expected.mean((2, 3)))
         self.assertEqual(model.head(feats).shape, (2, 12))
 
     def test_gradients_open_after_first_update_and_all_parameters_are_unfrozen(self):
@@ -171,9 +221,13 @@ class FusionTests(unittest.TestCase):
                 for fusion in (bb.f1, bb.f2):
                     self.assertEqual(fusion.down.weight.grad.abs().sum().item(), 0)
                     self.assertEqual(fusion.dw.weight.grad.abs().sum().item(), 0)
+                    # The gate multiplies a zero residual, so it learns from step 1.
+                    self.assertEqual(fusion.gate[0].weight.grad.abs().sum().item(), 0)
+                    self.assertEqual(fusion.gate[2].weight.grad.abs().sum().item(), 0)
             else:
                 for module in (bb.coatnet.stem, bb.resnet50.conv3, bb.resnet50.conv5,
-                               bb.f1.down, bb.f2.down, bb.f1.dw, bb.f2.dw):
+                               bb.f1.down, bb.f2.down, bb.f1.dw, bb.f2.dw,
+                               bb.f1.gate[0], bb.f2.gate[0], bb.f1.gate[2], bb.f2.gate[2]):
                     self.assertGreater(module.weight.grad.abs().sum().item(), 0)
             optimizer.step()
 

@@ -17,12 +17,13 @@ The published V10 run's optional ConvNeXt arm failed closed because its manifest
 ## Raptor v5 + ImageNet ResNet50 experiment
 
 The `codex/raptor-v5-resnet50-fusion` branch adds a trainable model in
-`models/raptor_v5_resnet50.py` with residual bottleneck fusion (separate
-LayerNorms, 1×1 down, depthwise 3×3, GELU, 1×1 up; ≈1.2M parameters) of
+`models/raptor_v5_resnet50.py` with channel-gated residual bottleneck fusion
+(separate LayerNorms, 1×1 down, depthwise 3×3, GELU, 1×1 up, SE-style
+per-channel gate; ≈1.78M parameters) of
 ImageNet-1K V2 ResNet50 conv3_x/conv5_x into CoAtNet Stage2/Stage4. This child
 branch of `codex/raptor-v5-radimagenet-fusion` replaces the RadImageNet weights
 and swaps the parent's ≈14.7M-parameter three-layer MLP fusion for the lighter
-bottleneck, keeping the same fusion points and training settings. Both backbones
+gated bottleneck, keeping the same fusion points and training settings. Both backbones
 receive the same complete three-channel 384×384 triplet and remain unfrozen;
 ResNet50 does not select or repeat the middle slice. `raptor_data/series_triplets.py`
 keeps every triplet within one MRI series while preserving the dense triplet

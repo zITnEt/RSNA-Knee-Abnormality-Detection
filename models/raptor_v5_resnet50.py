@@ -17,9 +17,10 @@ from torch.utils.checkpoint import checkpoint
 
 
 COATNET_ARCH = "coatnet_rmlp_2_rw_384.sw_in12k_ft_in1k"
-# v2: bottleneck fusion (separate LNs, 1x1 down, DW 3x3, GELU, 1x1 up).
-# v1 checkpoints used the 3-layer concatenation MLP and do not load here.
-FUSED_FORMAT = "raptor_v5_resnet50_v2"
+# v3: bottleneck fusion (separate LNs, 1x1 down, DW 3x3, GELU, 1x1 up) with a
+# channel-wise gate on the residual. v1 (3-layer concatenation MLP) and v2
+# (ungated bottleneck) fused checkpoints do not load here.
+FUSED_FORMAT = "raptor_v5_resnet50_v3"
 LABELS = (
     "ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA",
     "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker's",
@@ -31,6 +32,9 @@ LABELS = (
 class FusionConfig:
     stage2_hidden: int = 128
     stage4_hidden: int = 256
+    # Hidden width of each channel-gate MLP; 0 disables gating (g = 1).
+    stage2_gate_hidden: int = 64
+    stage4_gate_hidden: int = 128
     mlp_dropout: float = 0.0
     head_dropout: float = 0.2
     gradient_checkpointing: bool = False
@@ -40,7 +44,7 @@ class BottleneckFusion(nn.Module):
     """Mix-FFN style residual fusion of two aligned feature maps.
 
     LN_a(a), LN_b(b) -> concat -> 1x1 down (to `hidden`) -> depthwise 3x3
-    -> GELU -> Dropout -> 1x1 up (zero-initialized).
+    -> GELU -> Dropout -> 1x1 up (zero-initialized) = F, returned as g * F.
 
     Each input is normalized separately, so neither backbone's feature scale
     dominates the other's. The depthwise 3x3 lets every output position use
@@ -48,13 +52,22 @@ class BottleneckFusion(nn.Module):
     misalignment between the two trunks' receptive fields. Only the up
     projection starts at zero, so the residual is exactly zero initially
     without a dead block.
+
+    Channel gate (gate_hidden > 0): g = sigmoid(W2 GELU(W1 p)), where p is
+    the spatial mean of the normalized, concatenated inputs. One gate value
+    per sample and output channel, shared by all positions, so each window
+    decides how much of each channel's correction to admit. The gate cannot
+    disturb the zero start because it multiplies a residual that is zero.
     """
 
     def __init__(self, first_channels: int, second_channels: int,
-                 out_channels: int, hidden: int, dropout: float = 0.0):
+                 out_channels: int, hidden: int, dropout: float = 0.0,
+                 gate_hidden: int = 0):
         super().__init__()
         if min(first_channels, second_channels, out_channels, hidden) <= 0:
             raise ValueError("Fusion channel dimensions must be positive")
+        if gate_hidden < 0:
+            raise ValueError("gate_hidden must be nonnegative (0 disables the gate)")
         self.first_channels = first_channels
         self.second_channels = second_channels
         self.norm_first = nn.LayerNorm(first_channels)
@@ -66,6 +79,14 @@ class BottleneckFusion(nn.Module):
         self.up = nn.Conv2d(hidden, out_channels, 1)
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
+        # Default init with zero logit bias: gates start near 0.5 and are
+        # input-dependent from the first update on.
+        self.gate = (nn.Sequential(
+            nn.Linear(first_channels + second_channels, gate_hidden), nn.GELU(),
+            nn.Linear(gate_hidden, out_channels), nn.Sigmoid(),
+        ) if gate_hidden else None)
+        if self.gate is not None:
+            nn.init.zeros_(self.gate[2].bias)
 
     def forward(self, first: Tensor, second: Tensor) -> Tensor:
         if (first.ndim != 4 or second.ndim != 4
@@ -76,8 +97,13 @@ class BottleneckFusion(nn.Module):
             raise ValueError(f"Incompatible fusion features: {first.shape}, {second.shape}")
         a = self.norm_first(first.permute(0, 2, 3, 1))  # LayerNorm over channels
         b = self.norm_second(second.permute(0, 2, 3, 1))
-        h = self.down(torch.cat((a, b), dim=-1)).permute(0, 3, 1, 2)  # NCHW
-        return self.up(self.drop(self.act(self.dw(h))))
+        joined = torch.cat((a, b), dim=-1)  # [N, H, W, Ca+Cb]
+        h = self.down(joined).permute(0, 3, 1, 2)  # NCHW
+        residual = self.up(self.drop(self.act(self.dw(h))))
+        if self.gate is None:
+            return residual
+        g = self.gate(joined.mean(dim=(1, 2)))  # [N, Cout]: one gate per channel
+        return residual * g[:, :, None, None]
 
 
 class ResNet50Encoder(nn.Module):
@@ -111,7 +137,10 @@ class ResNet50Encoder(nn.Module):
 
 
 class FusedCoAtNet(nn.Module):
-    """Stage2 Z += F1(X,Z), Stage4 V += F2(V,Y), then normal CoAtNet pooling."""
+    """Stage2 Z += g1*F1(X,Z), Stage4 V += g2*F2(V,Y), then normal CoAtNet pooling.
+
+    g1, g2 are the per-channel gates computed inside each fusion block.
+    """
 
     def __init__(self, coatnet: nn.Module, resnet50: nn.Module,
                  config: FusionConfig = FusionConfig()):
@@ -122,8 +151,10 @@ class FusedCoAtNet(nn.Module):
         channels = [entry["num_chs"] for entry in coatnet.feature_info]
         if len(coatnet.stages) != 4 or channels[-4:] != [128, 256, 512, 1024]:
             raise ValueError("Expected the four-stage Raptor v5 CoAtNet RMLP-2")
-        self.f1 = BottleneckFusion(512, 256, 256, config.stage2_hidden, config.mlp_dropout)
-        self.f2 = BottleneckFusion(1024, 2048, 1024, config.stage4_hidden, config.mlp_dropout)
+        self.f1 = BottleneckFusion(512, 256, 256, config.stage2_hidden, config.mlp_dropout,
+                                   gate_hidden=config.stage2_gate_hidden)
+        self.f2 = BottleneckFusion(1024, 2048, 1024, config.stage4_hidden, config.mlp_dropout,
+                                   gate_hidden=config.stage4_gate_hidden)
         self.gradient_checkpointing = config.gradient_checkpointing
         self.requires_grad_(True)
         self.coatnet.set_grad_checkpointing(config.gradient_checkpointing)

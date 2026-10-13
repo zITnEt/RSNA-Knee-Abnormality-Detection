@@ -18,9 +18,10 @@ def main():
     cells = [cell("markdown", """# Raptor v5 + ResNet50 residual fusion
 
 Both unfrozen backbones receive the same preprocessed 384×384 adjacent-slice
-triplet. CoAtNet S2 uses `Z + F1(X,Z)`; S4 uses `V + F2(V,Y)`.
+triplet. CoAtNet S2 uses `Z + g1 ⊙ F1(X,Z)`; S4 uses `V + g2 ⊙ F2(V,Y)`.
 Each fusion block is a small bottleneck (separate LayerNorms, 1×1 down,
-depthwise 3×3, GELU, 1×1 up; ≈1.2M parameters in total), and both
+depthwise 3×3, GELU, 1×1 up) with an SE-style per-channel gate g ∈ (0,1)
+computed from the pooled inputs (≈1.78M parameters in total), and both
 corrections initialize to exactly zero. The original Raptor MIL head
 continues after CoAtNet pooling. This notebook builds the architecture and
 optimizer and a series-aware loader. Use this loader to train it; anonymous

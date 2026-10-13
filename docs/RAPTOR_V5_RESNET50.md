@@ -26,11 +26,11 @@ shared 3×384×384 triplet
   ├─ ResNet-50 stem → conv2_x → conv3_x X → conv4_x → conv5_x Y
   └─ CoAtNet S0 → S1 → S2 Z
                          ↓
-               Z' = Z + F1(concat[X,Z])
+               Z' = Z + g1 ⊙ F1(X, Z)
                          ↓
                     S3 → S4 V
                          ↓
-               V' = V + F2(concat[V,Y])
+               V' = V + g2 ⊙ F2(V, Y)
                          ↓
                 CoAtNet final norm → average pooling
                          ↓
@@ -52,12 +52,24 @@ tolerating small misalignment between the two trunks' receptive fields.
 Neither feature map is globally pooled before fusion, and matching strides make
 interpolation unnecessary.
 
+Each residual is gated per channel: `Z' = Z + g1 ⊙ F1(X, Z)` and
+`V' = V + g2 ⊙ F2(V, Y)`. The gate is SE-style,
+`g = sigmoid(W2 · GELU(W1 · p))`, where `p` is the spatial mean of the two
+separately normalized, concatenated inputs. It gives one value in (0, 1) per
+window and output channel, shared across positions, so each image decides how
+much of each channel's correction to admit. Gate MLPs are `768 → 64 → 256`
+(≈66k) and `3072 → 128 → 1024` (≈525k), so the gates add ≈0.59M and the two
+fusion blocks total ≈1.78M parameters. `stage2_gate_hidden=0` or
+`stage4_gate_hidden=0` disables a gate (g = 1) for ablations. The gate's logit
+bias starts at zero, so gates start near 0.5.
+
 Only the up-projection's weight and bias start at zero. Therefore both residual
 corrections are exactly zero initially, and the loaded Raptor predictions are
 preserved for the **same 384 input** in evaluation mode. The down-projection
 and depthwise conv use normal random initialization, allowing the up-projection
-to learn on the first backward pass. The zero up-projections also mean ResNet50
-and the earlier fusion layers receive zero loss gradients on the first backward pass;
+to learn on the first backward pass. The gate multiplies that zero residual, so
+it cannot disturb the zero start. The zero up-projections also mean ResNet50,
+the earlier fusion layers and the gates receive zero loss gradients on the first backward pass;
 their gradients open after the projections change. This is initialization
 behavior, not freezing. CoAtNet retains its original gradient path throughout.
 
@@ -106,9 +118,9 @@ including `fc.weight` and `fc.bias`; loading is strict before the average pool
 and classification head are removed. Missing or incompatible weights fail
 loading. `resnet50_weights=None` explicitly requests random weights for
 architecture tests only. Fused checkpoints have a separate
-`raptor_v5_resnet50_v2` format and `backbone.resnet50.*` keys; restoration loads
-the saved weights without downloading either parent. Fused `v1` checkpoints,
-saved with the earlier three-layer MLP fusion, are rejected.
+`raptor_v5_resnet50_v3` format and `backbone.resnet50.*` keys; restoration loads
+the saved weights without downloading either parent. Fused `v1` (three-layer
+MLP fusion) and `v2` (ungated bottleneck) checkpoints are rejected.
 
 All model parameters have `requires_grad=True`. The optimizer helper includes
 every parameter exactly once: CoAtNet and ResNet50 at `1e-5`, fusion and MIL
