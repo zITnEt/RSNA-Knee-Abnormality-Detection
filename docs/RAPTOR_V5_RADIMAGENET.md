@@ -2,6 +2,68 @@
 
 Branch: `codex/raptor-v5-radimagenet-fusion`.
 
+## Kaggle training with the completed tensors
+
+The generated `kaggle/raptor_v5_radimagenet_fusion.ipynb` now runs training via
+`scripts/train_fusion_ready.py`, using `ReadyTripletDataset` instead of the raw
+DICOM loader described below. Load the saved `[K,3,384,384]` float16 images
+directly: no decoding, crop, resize, `/255`, or second normalization occurs.
+Both backbones receive exactly the same saved tensor. Sampling K=12 is bag
+selection only in the generic loader. This run sets K=None and uses all saved
+triplets. All exported windows, including documented series-boundary
+windows, are preserved to follow the requested six-slot dataset recipe.
+
+Attach all 32 completed preprocessing notebook outputs, the two pretrained
+parent datasets, and `riadmohamed42/jev-knee-labels`.
+`scripts/build_fusion_notebook.py` generates the notebook and
+private upload metadata in `kaggle/raptor_v5_radimagenet_training/`.
+The launch uses Kaggle's `NvidiaTeslaT4` machine shape (T4 ×2), per the
+[official metadata documentation](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels_metadata.md).
+
+Defaults: 50 epochs, `HYBRID_labels_scores.csv` soft targets, deterministic seed 20261009,
+3,466 gradient-training studies / 867 study-level validation studies (80/20), and
+all 74 gold studies excluded. This validation monitors soft-target BCE;
+neither source-label calibration nor the pretrained parent's prior training
+is undone by the new split. Patient-level disjointness has not been established.
+Training batch size is 2 with 8 gradient-accumulation steps. Both backbones
+remain unfrozen at LR 1e-5; fusion/head LR 1e-4, AdamW weight decay 0.01,
+cosine schedule, AMP and gradient clipping. Full variable-length study bags
+use chunks of four triplets with checkpointing around the entire backbone.
+All chunk features feed a single study attention head, and all triplets receive
+gradients. Ragged batches put one complete study on each GPU, without padding.
+BatchNorm running buffers are restored after recomputation to avoid counting
+each chunk twice; nested CoAtNet/fusion checkpointing is disabled.
+Evaluation encodes the complete saved bag in chunks before a single MIL head.
+
+`fusion_last.pt` stores model, optimizer, scaler, scheduler, split, settings,
+epoch/batch position and RNG states. It is saved after the first optimizer
+update, every 100 updates in version 2 / 25 updates in continuation sessions,
+and each epoch. `fusion_best.pt` stores best soft-BCE
+validation weights. A 10.5-hour guard saves a resumable checkpoint and ends
+cleanly. The revised initial version 2 uses the original 10.5-hour guard;
+its replacement with a shorter guard was blocked by the two-session GPU cap.
+Continuation sessions use a guard up to 4.5 hours, reduced to fit reported
+remaining quota, and request a six-hour timeout. Override `RUN_CONFIG` in
+the notebook for another run or an attached resume checkpoint. The read-only
+`scripts/monitor_kaggle_training.py` checks status every 60 seconds for up to
+13 hours and saves small progress receipts under `results/fusion_training`.
+The new `scripts/monitor_fusion_campaign.py` monitors the HYBRID campaign every
+minute and creates private continuation notebooks after a clean checkpoint
+pause. It waits for quota without enabling paid scaling, stops on unexplained
+failures, and records state under `results/fusion_training_hybrid50`. It is
+bounded to 14 days; rerun the script to continue the saved campaign after that
+monitor expires. GPU quota can prevent completing all 50 epochs in that time.
+The HYBRID file has three missing cells on an excluded gold study; no training
+or validation target is missing or filled in. The split excludes gold studies
+before target validation. New continuation checkpoints also pin the label file
+hash and batch size, and copy the previous best weights forward when present.
+Continuation AMP dtype is set explicitly in each GPU worker: native BF16
+where supported, otherwise FP16 with a gradient scaler. This avoids relying
+on the worker thread's default autocast dtype.
+
+The raw DICOM loader below remains available for future raw inputs; it is
+not called by this Kaggle training notebook.
+
 The new model changes CoAtNet inside Raptor v5. Both unfrozen encoders see the
 **same preprocessed adjacent-slice triplet**, at 384×384. The dataset should
 return `[B, K, 3, 384, 384]`, where K is the number of triplets in each study.

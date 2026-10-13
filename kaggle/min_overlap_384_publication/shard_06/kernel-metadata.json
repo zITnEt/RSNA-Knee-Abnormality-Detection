@@ -1,0 +1,16 @@
+{
+  "id": "zafarnematov/rsna-series-safe-384-preprocessing-06",
+  "title": "RSNA Series Safe 384 Preprocessing 06",
+  "code_file": "publish.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "competition_sources": [],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "zafarnematov/rsna-min-overlap-384-preprocessing-06"
+  ],
+  "model_sources": []
+}

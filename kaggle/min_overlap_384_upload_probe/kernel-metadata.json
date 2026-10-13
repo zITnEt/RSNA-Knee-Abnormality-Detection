@@ -1,0 +1,16 @@
+{
+  "id": "zafarnematov/rsna-min-overlap-384-upload-probe",
+  "title": "RSNA Min Overlap 384 Upload Probe",
+  "code_file": "upload_probe.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "competition_sources": [],
+  "dataset_sources": [],
+  "model_sources": [],
+  "kernel_sources": [
+    "zafarnematov/rsna-series-safe-384-preprocessing-22"
+  ]
+}

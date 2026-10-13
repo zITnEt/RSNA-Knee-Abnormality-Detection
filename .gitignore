@@ -22,6 +22,8 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 .cache/
+.runtime_preprocess/
+.runtime_fusion/
 audit/
 
 # Keep the validated baseline CSV once produced.

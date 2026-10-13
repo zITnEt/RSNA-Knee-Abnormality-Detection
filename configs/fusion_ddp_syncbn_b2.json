@@ -1,0 +1,12 @@
+{
+  "epochs": 20,
+  "k": 12,
+  "studies_per_gpu": 2,
+  "effective_batch": 32,
+  "freeze_bn_stats": false,
+  "sync_batchnorm": true,
+  "checkpoint_parts": ["rad", "s1", "s2", "s3", "s4", "fusion"],
+  "probe_reserve_gib": 2.0,
+  "memory_limit_gib": 13.5,
+  "resume_path": null
+}

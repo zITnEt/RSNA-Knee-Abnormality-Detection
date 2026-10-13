@@ -1,0 +1,79 @@
+{
+  "rsna-fusion-cv5-smoke": {
+    "epochs": 5,
+    "validation_eval": "every",
+    "eval_at_start": false,
+    "k": 12,
+    "studies_per_gpu": 1,
+    "effective_batch": 16,
+    "freeze_bn_stats": true,
+    "sync_batchnorm": false,
+    "rad_input": "pm1_middle",
+    "cv_folds": 5,
+    "cv_seed": 20261010,
+    "max_hours": 7.0,
+    "resume_path": null,
+    "run_folds": [
+      0
+    ],
+    "smoke": true,
+    "smoke_updates": 4,
+    "smoke_validation_studies": 24
+  },
+  "rsna-fusion-cv5-f01": {
+    "epochs": 5,
+    "validation_eval": "every",
+    "eval_at_start": false,
+    "k": 12,
+    "studies_per_gpu": 1,
+    "effective_batch": 16,
+    "freeze_bn_stats": true,
+    "sync_batchnorm": false,
+    "rad_input": "pm1_middle",
+    "cv_folds": 5,
+    "cv_seed": 20261010,
+    "max_hours": 7.0,
+    "resume_path": null,
+    "run_folds": [
+      0,
+      1
+    ]
+  },
+  "rsna-fusion-cv5-f23": {
+    "epochs": 5,
+    "validation_eval": "every",
+    "eval_at_start": false,
+    "k": 12,
+    "studies_per_gpu": 1,
+    "effective_batch": 16,
+    "freeze_bn_stats": true,
+    "sync_batchnorm": false,
+    "rad_input": "pm1_middle",
+    "cv_folds": 5,
+    "cv_seed": 20261010,
+    "max_hours": 7.0,
+    "resume_path": null,
+    "run_folds": [
+      2,
+      3
+    ]
+  },
+  "rsna-fusion-cv5-f4": {
+    "epochs": 5,
+    "validation_eval": "every",
+    "eval_at_start": false,
+    "k": 12,
+    "studies_per_gpu": 1,
+    "effective_batch": 16,
+    "freeze_bn_stats": true,
+    "sync_batchnorm": false,
+    "rad_input": "pm1_middle",
+    "cv_folds": 5,
+    "cv_seed": 20261010,
+    "max_hours": 7.0,
+    "resume_path": null,
+    "run_folds": [
+      4
+    ]
+  }
+}
