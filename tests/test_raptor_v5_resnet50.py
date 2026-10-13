@@ -6,7 +6,7 @@ import unittest
 import torch
 from torch import nn
 
-from models.raptor_v5_radimagenet import (
+from models.raptor_v5_resnet50 import (
     ConcatenationMLP, FusedCoAtNet, FusionConfig, RaptorClassifier,
     optimizer_groups,
 )
@@ -36,7 +36,7 @@ class SmallCoAtNet(nn.Module):
         return self.forward_head(self.norm(self.stages(self.stem(x))))
 
 
-class SmallRad(nn.Module):
+class SmallResNet50(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv3 = nn.Conv2d(3, 512, 1, stride=32)
@@ -55,7 +55,7 @@ class FusionTests(unittest.TestCase):
     def make_model(self, checkpointing=False):
         config = FusionConfig(stage2_hidden=32, stage4_hidden=32,
                               gradient_checkpointing=checkpointing)
-        backbone = FusedCoAtNet(SmallCoAtNet(), SmallRad(), config)
+        backbone = FusedCoAtNet(SmallCoAtNet(), SmallResNet50(), config)
         model = RaptorClassifier(backbone, 1024, drop=0.0)
         return model
 
@@ -84,19 +84,23 @@ class FusionTests(unittest.TestCase):
         bb = model.backbone
         inputs, stage2, stage3, fusion_inputs = [], [], [], []
         handles = [
-            bb.radimagenet.register_forward_pre_hook(lambda m, a: inputs.append(a[0])),
+            bb.resnet50.register_forward_pre_hook(lambda m, a: inputs.append(a[0])),
             bb.coatnet.stem.register_forward_pre_hook(lambda m, a: inputs.append(a[0])),
             bb.coatnet.stages[1].register_forward_hook(lambda m, a, out: stage2.append(out)),
             bb.coatnet.stages[2].register_forward_pre_hook(lambda m, a: stage3.append(a[0])),
             bb.f1.register_forward_pre_hook(lambda m, a: fusion_inputs.append(a)),
         ]
+        # Three distinct slice channels must reach BOTH trunks unchanged.
+        triplets = torch.stack([torch.full((384, 384), float(i))
+                                for i in (1, 2, 3)]).reshape(1, 1, 3, 384, 384)
         # A nonzero correction must be visible in the *next* CoAtNet stage.
         with torch.no_grad():
             bb.f1.mlp[-1].bias.fill_(0.25)
-            model(torch.randn(1, 1, 3, 384, 384))
+            model(triplets)
         for handle in handles:
             handle.remove()
         self.assertIs(inputs[0], inputs[1])
+        torch.testing.assert_close(inputs[0], triplets.flatten(0, 1), rtol=0, atol=0)
         torch.testing.assert_close(stage3[0], stage2[0] + 0.25)
         self.assertEqual(fusion_inputs[0][0].shape[1], 512)  # X first
         self.assertIs(fusion_inputs[0][1], stage2[0])  # Z second
@@ -134,10 +138,10 @@ class FusionTests(unittest.TestCase):
             for fusion in (bb.f1, bb.f2):
                 self.assertGreater(fusion.mlp[-1].weight.grad.abs().sum().item(), 0)
             if step == 0:
-                # Exact zero projections temporarily block gradients to Rad.
-                self.assertEqual(bb.radimagenet.conv3.weight.grad.abs().sum().item(), 0)
+                # Exact zero projections temporarily block gradients to ResNet50.
+                self.assertEqual(bb.resnet50.conv3.weight.grad.abs().sum().item(), 0)
             else:
-                for module in (bb.coatnet.stem, bb.radimagenet.conv3, bb.radimagenet.conv5,
+                for module in (bb.coatnet.stem, bb.resnet50.conv3, bb.resnet50.conv5,
                                bb.f1.mlp[1], bb.f2.mlp[1]):
                     self.assertGreater(module.weight.grad.abs().sum().item(), 0)
             optimizer.step()
@@ -157,7 +161,7 @@ class FusionTests(unittest.TestCase):
         for shape in ((1, 1, 3, 336, 336), (1, 0, 3, 384, 384), (1, 3, 384, 384)):
             with self.assertRaises(ValueError):
                 model(torch.zeros(shape))
-        model.backbone.radimagenet.requires_grad_(False)
+        model.backbone.resnet50.requires_grad_(False)
         with self.assertRaises(ValueError):
             optimizer_groups(model)
         with self.assertRaises(ValueError):

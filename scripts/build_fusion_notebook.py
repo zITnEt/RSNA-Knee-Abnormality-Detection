@@ -15,7 +15,7 @@ def cell(kind, source):
 
 
 def main():
-    cells = [cell("markdown", """# Raptor v5 + RadImageNet residual fusion
+    cells = [cell("markdown", """# Raptor v5 + ResNet50 residual fusion
 
 Both unfrozen backbones receive the same preprocessed 384×384 adjacent-slice
 triplet. CoAtNet S2 uses `Z + F1(X,Z)`; S4 uses `V + F2(V,Y)`.
@@ -24,11 +24,12 @@ continues after CoAtNet pooling. This notebook builds the architecture and
 optimizer and a series-aware loader. Use this loader to train it; anonymous
 concatenated slice caches cannot enforce MRI series boundaries.
 
-Attach `dreaddevelopment/raptor-knee-maxspan`,
-`marwanmath/resnet-50-radimagenet-marwan`, and a `timm-1.0.22` wheel if your
-runtime does not already have that version. Attach the existing training
+Attach `dreaddevelopment/raptor-knee-maxspan`, the official torchvision
+ImageNet-1K V2 checkpoint `resnet50-11ad3fa6.pth`, and a `timm-1.0.22` wheel if
+your runtime does not already have that version. Attach the existing training
 competition series and labels for training. No checkpoint or competition data
-downloads occur. Dense eval preserves the parent's per-study triplet count
+downloads occur. ResNet50 receives all three slice channels, exactly as CoAtNet
+does. Dense eval preserves the parent's per-study triplet count
 (usually 94), using up to 104 sampled slices across five series.
 """), cell("code", """import importlib.metadata
 import subprocess
@@ -45,11 +46,9 @@ if timm_version != '1.0.22':
         raise RuntimeError('Attach the timm 1.0.22 wheel before running offline')
     subprocess.check_call([sys.executable, '-m', 'pip', 'install',
                            '--no-index', '--no-deps', str(wheels[0])])
-"""), cell("code", (ROOT / "models/raptor_v5_radimagenet.py").read_text(encoding="utf-8")),
+"""), cell("code", (ROOT / "models/raptor_v5_resnet50.py").read_text(encoding="utf-8")),
         cell("code", (ROOT / "raptor_data/series_triplets.py").read_text(encoding="utf-8")),
-        cell("code", """import hashlib
-
-def attached_asset(relative_paths):
+        cell("code", """def attached_asset(relative_paths):
     existing = [Path(p) for p in relative_paths if Path(p).is_file()]
     if len(existing) != 1:
         raise FileNotFoundError(f'Expected one attached parent asset: {relative_paths}; found {existing}')
@@ -59,20 +58,20 @@ raptor_path = attached_asset([
     '/kaggle/input/datasets/dreaddevelopment/raptor-knee-maxspan/raptor_ft_coatnet_v5_full_swa.pt',
     '/kaggle/input/raptor-knee-maxspan/raptor_ft_coatnet_v5_full_swa.pt',
 ])
-rad_path = attached_asset([
-    '/kaggle/input/datasets/marwanmath/resnet-50-radimagenet-marwan/ResNet50.pt',
-    '/kaggle/input/resnet-50-radimagenet-marwan/ResNet50.pt',
-])
+resnet50_paths = sorted(Path('/kaggle/input').rglob('resnet50-11ad3fa6.pth'))
+resnet50_path = attached_asset(resnet50_paths)
+# Check the official torchvision SHA-256 filename prefix before strict loading.
+import hashlib
 digest = hashlib.sha256()
-with rad_path.open('rb') as stream:
+with resnet50_path.open('rb') as stream:
     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
         digest.update(chunk)
-if digest.hexdigest() != '08629f7e7bd3e29b8ee9522ca3f65ce4d010a7ddf74f0ea3c7e3f3d0bbab0734':
-    raise RuntimeError('RadImageNet checkpoint differs from the baseline manifest')
+if not digest.hexdigest().startswith('11ad3fa6'):
+    raise RuntimeError('ResNet50 checkpoint differs from torchvision ImageNet-1K V2')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 config = FusionConfig()
-model = build_raptor_v5_radimagenet(raptor_path, rad_path, config).to(device).train()
+model = build_raptor_v5_resnet50(raptor_path, resnet50_path, config).to(device).train()
 optimizer = torch.optim.AdamW(optimizer_groups(model), weight_decay=0.01)
 print('Parameters:', sum(p.numel() for p in model.parameters()))
 print('Trainable:', sum(p.numel() for p in model.parameters() if p.requires_grad))
@@ -119,13 +118,13 @@ def train_step(triplets, targets):
 # After training, preserve both trunks, both fusion MLPs, and the original head:
 # checkpoint_data = fused_checkpoint(model)
 # checkpoint_data.update(optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), epoch=epoch)
-# torch.save(checkpoint_data, '/kaggle/working/raptor_v5_radimagenet.pt')
+# torch.save(checkpoint_data, '/kaggle/working/raptor_v5_resnet50.pt')
 """)]
     notebook = {"cells": cells, "metadata": {
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
         "language_info": {"name": "python"},
     }, "nbformat": 4, "nbformat_minor": 5}
-    destination = ROOT / "kaggle/raptor_v5_radimagenet_fusion.ipynb"
+    destination = ROOT / "kaggle/raptor_v5_resnet50_fusion.ipynb"
     destination.write_text(json.dumps(notebook, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     print(destination)
 

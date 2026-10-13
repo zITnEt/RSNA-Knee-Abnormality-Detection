@@ -1,12 +1,14 @@
-# Raptor v5 + RadImageNet ResNet-50
+# Raptor v5 + ImageNet ResNet-50
 
-Branch: `codex/raptor-v5-radimagenet-fusion`.
+Branch: `codex/raptor-v5-resnet50-fusion`, based on `codex/raptor-v5-radimagenet-fusion` at `d42bb2b`.
 
 The new model changes CoAtNet inside Raptor v5. Both unfrozen encoders see the
 **same preprocessed adjacent-slice triplet**, at 384×384. The dataset should
 return `[B, K, 3, 384, 384]`, where K is the number of triplets in each study.
 Flattening B and K happens once before passing the same tensor to both trunks.
-No branch-specific normalization, resizing, or detachment occurs in the model.
+All three acquired-slice channels reach both trunks unchanged. ResNet50 does not
+select or repeat the middle slice. No branch-specific normalization, resizing,
+or detachment occurs in the model.
 
 ## Fusion and continuation
 
@@ -14,9 +16,9 @@ The stem is CoAtNet S0. Its four entries in `stages` are S1 through S4.
 
 | Symbol | Feature source | Shape per triplet |
 | --- | --- | --- |
-| X | RadImageNet conv3_x = torchvision layer2 | 512 × 48 × 48 |
+| X | ResNet50 conv3_x = torchvision layer2 | 512 × 48 × 48 |
 | Z | CoAtNet S2 = stages[1], convolution | 256 × 48 × 48 |
-| Y | RadImageNet conv5_x = torchvision layer4 | 2048 × 12 × 12 |
+| Y | ResNet50 conv5_x = torchvision layer4 | 2048 × 12 × 12 |
 | V | CoAtNet S4 = stages[3], transformer | 1024 × 12 × 12 |
 
 ```text
@@ -46,7 +48,7 @@ Only the last linear's weight and bias start at zero. Therefore both residual
 corrections are exactly zero initially, and the loaded Raptor predictions are
 preserved for the **same 384 input** in evaluation mode. Earlier MLP layers use
 normal random initialization, allowing the final projection to learn on the
-first backward pass. The zero output projections also mean RadImageNet and the
+first backward pass. The zero output projections also mean ResNet50 and the
 earlier fusion layers receive zero loss gradients on the first backward pass;
 their gradients open after the projections change. This is initialization
 behavior, not freezing. CoAtNet retains its original gradient path throughout.
@@ -55,18 +57,22 @@ behavior, not freezing. CoAtNet retains its original gradient path throughout.
 
 Install `requirements-model.txt` in the training runtime, using a compatible
 PyTorch/torchvision pair for its GPU. timm is pinned to 1.0.22, as in the
-baseline. Model construction never downloads pretrained weights.
+baseline. The standard factory uses torchvision `IMAGENET1K_V2` ResNet50
+weights, downloading them into the torch cache if absent. For offline use,
+provide the official full torchvision state dict, as below; this does not download
+weights. Do not apply the torchvision weight transforms: the existing shared
+384×384 triplet preprocessing stays unchanged.
 
 ```python
 import torch
-from models.raptor_v5_radimagenet import (
-    FusionConfig, build_raptor_v5_radimagenet, optimizer_groups,
+from models.raptor_v5_resnet50 import (
+    FusionConfig, build_raptor_v5_resnet50, optimizer_groups,
     fused_checkpoint, load_fused_checkpoint,
 )
 
-model = build_raptor_v5_radimagenet(
+model = build_raptor_v5_resnet50(
     raptor_checkpoint="/kaggle/input/datasets/dreaddevelopment/raptor-knee-maxspan/raptor_ft_coatnet_v5_full_swa.pt",
-    radimagenet_checkpoint="/kaggle/input/datasets/marwanmath/resnet-50-radimagenet-marwan/ResNet50.pt",
+    resnet50_checkpoint="/kaggle/input/your-resnet50-weights/resnet50-11ad3fa6.pth",
     config=FusionConfig(),
 ).cuda().train()
 optimizer = torch.optim.AdamW(optimizer_groups(model), weight_decay=0.01)
@@ -80,28 +86,34 @@ loss.backward()
 torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 optimizer.step()
 
-torch.save(fused_checkpoint(model), "raptor_v5_radimagenet.pt")
-resumed = load_fused_checkpoint("raptor_v5_radimagenet.pt").cuda()
+torch.save(fused_checkpoint(model), "raptor_v5_resnet50.pt")
+resumed = load_fused_checkpoint("raptor_v5_resnet50.pt").cuda()
 ```
 
 The factory first strict-loads the complete Raptor checkpoint into the original
-architecture, preserving all CoAtNet and MIL-head parameters. It strict-loads
-RadImageNet using the baseline encoder's `backbone.0` through `backbone.7` names.
-Then it wraps CoAtNet with fusion. Missing or incompatible weights fail loading;
-there is no random-weight fallback for either pretrained parent.
+architecture, preserving all CoAtNet and MIL-head parameters. ResNet50 uses
+standard ImageNet-1K V2 weights in place of the parent branch's RadImageNet
+weights. Local checkpoints use the full torchvision ResNet50 state dict,
+including `fc.weight` and `fc.bias`; loading is strict before the average pool
+and classification head are removed. Missing or incompatible weights fail
+loading. `resnet50_weights=None` explicitly requests random weights for
+architecture tests only. Fused checkpoints have a separate
+`raptor_v5_resnet50_v1` format and `backbone.resnet50.*` keys; restoration loads
+the saved weights without downloading either parent.
 
 All model parameters have `requires_grad=True`. The optimizer helper includes
-every parameter exactly once: CoAtNet and RadImageNet at `1e-5`, fusion and MIL
+every parameter exactly once: CoAtNet and ResNet50 at `1e-5`, fusion and MIL
 head at `1e-4`, with configurable rates. Calling `.train()` also trains both
 backbones' BatchNorm statistics. There is no frozen feature cache.
 
 `FusionConfig(gradient_checkpointing=True)` uses timm's CoAtNet block
-checkpointing and checkpoints the fusion MLPs. RadImageNet remains a normal
+checkpointing and checkpoints the fusion MLPs. ResNet50 remains a normal
 trainable forward pass. Use a small bag/batch size appropriate for GPU memory.
 
-The self-contained `kaggle/raptor_v5_radimagenet_fusion.ipynb` embeds the same
-model and series-aware loader modules, and verifies both parent files by the
-baseline manifest's Rad SHA-256 and the expected Raptor path. It builds the
+The self-contained `kaggle/raptor_v5_resnet50_fusion.ipynb` embeds the same
+model and series-aware loader modules, finds the attached Raptor checkpoint,
+and verifies the official `resnet50-11ad3fa6.pth` SHA-256 filename prefix.
+Attach this file as a Kaggle dataset for offline execution. It builds the
 model and optimizer; use `make_series_loader` with existing split IDs/labels
 to start an experiment. No training run or new
 accuracy result is claimed by this branch.
@@ -161,7 +173,7 @@ SeriesInstanceUID and physical-order provenance. Do not guess those boundaries.
 ## Validation
 
 ```powershell
-python -m unittest discover -s tests -p test_raptor_v5_radimagenet.py -v
+python -m unittest discover -s tests -p test_raptor_v5_resnet50.py -v
 python -m unittest discover -s tests -p test_raptor_real_backbones.py -v
 python -m unittest discover -s tests -p test_series_triplets.py -v
 python -m unittest discover -s tests -p test_series_dicom_reader.py -v
@@ -173,6 +185,7 @@ coverage, checkpointed MLP gradients, and input errors. The second uses the
 actual timm CoAtNet and torchvision ResNet-50 with random validation weights:
 real 384×384 map sizes, exact initial parent-logit equality, equivalence to the
 MIL class extracted from the baseline notebook, both backbone gradients, and
+strict local ImageNet checkpoint loading, all-three-channel shared input, and
 strict fused checkpoint roundtrip. It does not download medical images or
 pretrained checkpoint files.
 
@@ -184,4 +197,4 @@ of foreign series headers, and duplicate acquired slice detection.
 
 Source references: the preserved baseline notebook's cell 22 (`_KE_SRC`,
 `RaptorClassifier`) and `_RadEncoder`; [timm 1.0.22 CoAtNet implementation](https://github.com/huggingface/pytorch-image-models/blob/v1.0.22/timm/models/maxxvit.py);
-[RadImageNet project](https://github.com/BMEII-AI/RadImageNet).
+[torchvision ResNet50 weights and architecture](https://docs.pytorch.org/vision/main/models/generated/torchvision.models.resnet50.html).

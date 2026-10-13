@@ -1,4 +1,4 @@
-"""Raptor v5 with residual RadImageNet fusion inside CoAtNet.
+"""Raptor v5 with residual ResNet50 fusion inside CoAtNet.
 
 Input is an already preprocessed [B, K, 3, 384, 384] triplet bag. Both
 encoders receive exactly the same tensor; preprocessing belongs to the loader.
@@ -69,19 +69,25 @@ class ConcatenationMLP(nn.Module):
         return self.mlp(joined).permute(0, 3, 1, 2).contiguous()
 
 
-class RadImageNetEncoder(nn.Module):
-    """The same torchvision ResNet-50 trunk used by the baseline Rad encoder.
+class ResNet50Encoder(nn.Module):
+    """ImageNet ResNet-50 trunk receiving the full shared three-slice triplet.
 
-    Keep `backbone.0` ... `backbone.7` names for strict ResNet50.pt loading.
     conv3_x is backbone[5] (torchvision layer2); conv5_x is backbone[7]
-    (layer4). No ImageNet weights are substituted for RadImageNet weights.
+    (layer4). A local checkpoint must use the full torchvision state layout,
+    including fc; it is strict-loaded before the classification head is removed.
     """
 
-    def __init__(self):
+    def __init__(self, checkpoint_source: str | Path | Mapping[str, Any] | None = None,
+                 *, weights: str | None = "IMAGENET1K_V2"):
         super().__init__()
-        from torchvision.models import resnet50
+        from torchvision.models import ResNet50_Weights, resnet50
 
-        self.backbone = nn.Sequential(*list(resnet50(weights=None).children())[:-2])
+        network = resnet50(weights=(ResNet50_Weights.verify(weights)
+                                   if checkpoint_source is None else None))
+        if checkpoint_source is not None:
+            ck = _checkpoint(checkpoint_source)
+            network.load_state_dict(ck.get("state_dict", ck), strict=True)
+        self.backbone = nn.Sequential(*list(network.children())[:-2])
 
     def forward(self, image: Tensor) -> tuple[Tensor, Tensor]:
         x = image
@@ -96,11 +102,11 @@ class RadImageNetEncoder(nn.Module):
 class FusedCoAtNet(nn.Module):
     """Stage2 Z += F1(X,Z), Stage4 V += F2(V,Y), then normal CoAtNet pooling."""
 
-    def __init__(self, coatnet: nn.Module, radimagenet: nn.Module,
+    def __init__(self, coatnet: nn.Module, resnet50: nn.Module,
                  config: FusionConfig = FusionConfig()):
         super().__init__()
         self.coatnet = coatnet
-        self.radimagenet = radimagenet
+        self.resnet50 = resnet50
         self.num_features = coatnet.num_features
         channels = [entry["num_chs"] for entry in coatnet.feature_info]
         if len(coatnet.stages) != 4 or channels[-4:] != [128, 256, 512, 1024]:
@@ -119,8 +125,9 @@ class FusedCoAtNet(nn.Module):
     def forward_features(self, image: Tensor) -> Tensor:
         if image.ndim != 4 or tuple(image.shape[1:]) != (3, 384, 384):
             raise ValueError("Both backbones require [N, 3, 384, 384] preprocessed triplets")
-        # Feed the identical image object to both trunks; no second normalization.
-        x, y = self.radimagenet(image)
+        # All three acquired-slice channels reach both trunks unchanged.
+        # Feed the identical image object; no middle-slice selection/replication.
+        x, y = self.resnet50(image)
         z = self.coatnet.stages[0](self.coatnet.stem(image))
         z = self.coatnet.stages[1](z)  # S2 convolution, [N,256,48,48]
         z = z + self._fuse(self.f1, x, z)  # F1 input order is (X,Z)
@@ -168,15 +175,18 @@ def _checkpoint(source: str | Path | Mapping[str, Any]) -> Mapping[str, Any]:
     )
 
 
-def build_raptor_v5_radimagenet(
+def build_raptor_v5_resnet50(
     raptor_checkpoint: str | Path | Mapping[str, Any],
-    radimagenet_checkpoint: str | Path | Mapping[str, Any],
+    resnet50_checkpoint: str | Path | Mapping[str, Any] | None = None,
     config: FusionConfig = FusionConfig(),
+    *, resnet50_weights: str | None = "IMAGENET1K_V2",
 ) -> RaptorClassifier:
     """Strict-load both pretrained parents, add zero residuals, unfreeze all.
 
     Raptor checkpoint: {'model': state_dict, 'arch': ..., 'res': 384}.
-    Rad checkpoint: the baseline ResNet50.pt state dict, or {'state_dict': ...}.
+    ResNet50 defaults to torchvision ImageNet-1K V2 pretrained weights.
+    For offline use, supply the full torchvision state dict (or {'state_dict': ...}).
+    Explicit resnet50_weights=None is for random-weight architecture tests.
     Load and resume a *fused* checkpoint using load_fused_checkpoint instead.
     """
     import timm
@@ -187,10 +197,8 @@ def build_raptor_v5_radimagenet(
     coatnet = timm.create_model(COATNET_ARCH, pretrained=False, num_classes=0, in_chans=3, global_pool="avg")
     model = RaptorClassifier(coatnet, F_dim=coatnet.num_features, drop=config.head_dropout)
     model.load_state_dict(ck["model"], strict=True)
-    rad = RadImageNetEncoder()
-    rad_ck = _checkpoint(radimagenet_checkpoint)
-    rad.load_state_dict(rad_ck.get("state_dict", rad_ck), strict=True)
-    model.backbone = FusedCoAtNet(coatnet, rad, config)
+    resnet = ResNet50Encoder(resnet50_checkpoint, weights=resnet50_weights)
+    model.backbone = FusedCoAtNet(coatnet, resnet, config)
     model.fusion_config = config
     model.requires_grad_(True)
     return model
@@ -203,25 +211,25 @@ def optimizer_groups(model: RaptorClassifier, backbone_lr: float = 1e-5,
         raise TypeError("Expected the fused Raptor model")
     if any(not p.requires_grad for p in model.parameters()):
         raise ValueError("Both backbones and the fusion/head must remain unfrozen")
-    groups = {"coatnet": [], "radimagenet": [], "fusion": [], "head": []}
+    groups = {"coatnet": [], "resnet50": [], "fusion": [], "head": []}
     for name, parameter in model.named_parameters():
         if name.startswith("backbone.coatnet."):
             group = "coatnet"
-        elif name.startswith("backbone.radimagenet."):
-            group = "radimagenet"
+        elif name.startswith("backbone.resnet50."):
+            group = "resnet50"
         elif name.startswith(("backbone.f1.", "backbone.f2.")):
             group = "fusion"
         else:
             group = "head"
         groups[group].append(parameter)
-    rates = dict(coatnet=backbone_lr, radimagenet=backbone_lr, fusion=fusion_lr, head=head_lr)
+    rates = dict(coatnet=backbone_lr, resnet50=backbone_lr, fusion=fusion_lr, head=head_lr)
     return [{"name": name, "params": parameters, "lr": rates[name]}
             for name, parameters in groups.items()]
 
 
 def fused_checkpoint(model: RaptorClassifier) -> dict[str, Any]:
     """Serialize model/config; trainers can add optimizer, scaler and epoch."""
-    return {"format": "raptor_v5_radimagenet_v1", "arch": COATNET_ARCH, "res": 384,
+    return {"format": "raptor_v5_resnet50_v1", "arch": COATNET_ARCH, "res": 384,
             "labels": list(LABELS), "fusion_config": asdict(model.fusion_config),
             "model": model.state_dict()}
 
@@ -230,12 +238,12 @@ def load_fused_checkpoint(source: str | Path | Mapping[str, Any]) -> RaptorClass
     import timm
 
     ck = _checkpoint(source)
-    if (ck.get("format") != "raptor_v5_radimagenet_v1" or ck.get("arch") != COATNET_ARCH
+    if (ck.get("format") != "raptor_v5_resnet50_v1" or ck.get("arch") != COATNET_ARCH
             or ck.get("res") != 384 or ck.get("labels") != list(LABELS)):
         raise ValueError("Unsupported fused checkpoint architecture/input/label contract")
     config = FusionConfig(**ck["fusion_config"])
     coatnet = timm.create_model(COATNET_ARCH, pretrained=False, num_classes=0, in_chans=3, global_pool="avg")
-    backbone = FusedCoAtNet(coatnet, RadImageNetEncoder(), config)
+    backbone = FusedCoAtNet(coatnet, ResNet50Encoder(weights=None), config)
     model = RaptorClassifier(backbone, F_dim=backbone.num_features, drop=config.head_dropout)
     model.fusion_config = config
     model.load_state_dict(ck["model"], strict=True)
