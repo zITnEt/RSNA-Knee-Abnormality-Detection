@@ -110,8 +110,8 @@ class RealBackboneTests(unittest.TestCase):
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 loss = nn.functional.binary_cross_entropy_with_logits(model(x[:, :1]), torch.ones(1, 12, device=device))
             loss.backward()
-            for mlp in (model.backbone.f1, model.backbone.f2):
-                self.assertGreater(mlp.mlp[-1].weight.grad.abs().sum().item(), 0)
+            for fusion in (model.backbone.f1, model.backbone.f2):
+                self.assertGreater(fusion.up.weight.grad.abs().sum().item(), 0)
             if step == 1:
                 for trunk in (model.backbone.coatnet, model.backbone.resnet50):
                     self.assertTrue(all(p.requires_grad for p in trunk.parameters()))

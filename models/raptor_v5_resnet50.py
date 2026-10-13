@@ -17,6 +17,9 @@ from torch.utils.checkpoint import checkpoint
 
 
 COATNET_ARCH = "coatnet_rmlp_2_rw_384.sw_in12k_ft_in1k"
+# v2: bottleneck fusion (separate LNs, 1x1 down, DW 3x3, GELU, 1x1 up).
+# v1 checkpoints used the 3-layer concatenation MLP and do not load here.
+FUSED_FORMAT = "raptor_v5_resnet50_v2"
 LABELS = (
     "ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA",
     "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker's",
@@ -26,37 +29,43 @@ LABELS = (
 
 @dataclass(frozen=True)
 class FusionConfig:
-    stage2_hidden: int = 1024
-    stage4_hidden: int = 2048
+    stage2_hidden: int = 128
+    stage4_hidden: int = 256
     mlp_dropout: float = 0.0
     head_dropout: float = 0.2
     gradient_checkpointing: bool = False
 
 
-class ConcatenationMLP(nn.Module):
-    """Three affine layers with GELU, applied to each spatial position.
+class BottleneckFusion(nn.Module):
+    """Mix-FFN style residual fusion of two aligned feature maps.
 
-    Concatenation precedes every learned operation. Only the output projection
-    is zero-initialized, so the residual is exactly zero without a dead MLP.
+    LN_a(a), LN_b(b) -> concat -> 1x1 down (to `hidden`) -> depthwise 3x3
+    -> GELU -> Dropout -> 1x1 up (zero-initialized).
+
+    Each input is normalized separately, so neither backbone's feature scale
+    dominates the other's. The depthwise 3x3 lets every output position use
+    the fused features of its 3x3 neighbourhood, tolerating the slight
+    misalignment between the two trunks' receptive fields. Only the up
+    projection starts at zero, so the residual is exactly zero initially
+    without a dead block.
     """
 
     def __init__(self, first_channels: int, second_channels: int,
                  out_channels: int, hidden: int, dropout: float = 0.0):
         super().__init__()
         if min(first_channels, second_channels, out_channels, hidden) <= 0:
-            raise ValueError("MLP channel dimensions must be positive")
+            raise ValueError("Fusion channel dimensions must be positive")
         self.first_channels = first_channels
         self.second_channels = second_channels
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(first_channels + second_channels),
-            nn.Linear(first_channels + second_channels, hidden),
-            nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(hidden, hidden),
-            nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(hidden, out_channels),
-        )
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        self.norm_first = nn.LayerNorm(first_channels)
+        self.norm_second = nn.LayerNorm(second_channels)
+        self.down = nn.Linear(first_channels + second_channels, hidden)
+        self.dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+        self.up = nn.Conv2d(hidden, out_channels, 1)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
 
     def forward(self, first: Tensor, second: Tensor) -> Tensor:
         if (first.ndim != 4 or second.ndim != 4
@@ -65,8 +74,10 @@ class ConcatenationMLP(nn.Module):
                 or first.shape[1] != self.first_channels
                 or second.shape[1] != self.second_channels):
             raise ValueError(f"Incompatible fusion features: {first.shape}, {second.shape}")
-        joined = torch.cat((first, second), dim=1).permute(0, 2, 3, 1)
-        return self.mlp(joined).permute(0, 3, 1, 2).contiguous()
+        a = self.norm_first(first.permute(0, 2, 3, 1))  # LayerNorm over channels
+        b = self.norm_second(second.permute(0, 2, 3, 1))
+        h = self.down(torch.cat((a, b), dim=-1)).permute(0, 3, 1, 2)  # NCHW
+        return self.up(self.drop(self.act(self.dw(h))))
 
 
 class ResNet50Encoder(nn.Module):
@@ -111,8 +122,8 @@ class FusedCoAtNet(nn.Module):
         channels = [entry["num_chs"] for entry in coatnet.feature_info]
         if len(coatnet.stages) != 4 or channels[-4:] != [128, 256, 512, 1024]:
             raise ValueError("Expected the four-stage Raptor v5 CoAtNet RMLP-2")
-        self.f1 = ConcatenationMLP(512, 256, 256, config.stage2_hidden, config.mlp_dropout)
-        self.f2 = ConcatenationMLP(1024, 2048, 1024, config.stage4_hidden, config.mlp_dropout)
+        self.f1 = BottleneckFusion(512, 256, 256, config.stage2_hidden, config.mlp_dropout)
+        self.f2 = BottleneckFusion(1024, 2048, 1024, config.stage4_hidden, config.mlp_dropout)
         self.gradient_checkpointing = config.gradient_checkpointing
         self.requires_grad_(True)
         self.coatnet.set_grad_checkpointing(config.gradient_checkpointing)
@@ -229,7 +240,7 @@ def optimizer_groups(model: RaptorClassifier, backbone_lr: float = 1e-5,
 
 def fused_checkpoint(model: RaptorClassifier) -> dict[str, Any]:
     """Serialize model/config; trainers can add optimizer, scaler and epoch."""
-    return {"format": "raptor_v5_resnet50_v1", "arch": COATNET_ARCH, "res": 384,
+    return {"format": FUSED_FORMAT, "arch": COATNET_ARCH, "res": 384,
             "labels": list(LABELS), "fusion_config": asdict(model.fusion_config),
             "model": model.state_dict()}
 
@@ -238,7 +249,7 @@ def load_fused_checkpoint(source: str | Path | Mapping[str, Any]) -> RaptorClass
     import timm
 
     ck = _checkpoint(source)
-    if (ck.get("format") != "raptor_v5_resnet50_v1" or ck.get("arch") != COATNET_ARCH
+    if (ck.get("format") != FUSED_FORMAT or ck.get("arch") != COATNET_ARCH
             or ck.get("res") != 384 or ck.get("labels") != list(LABELS)):
         raise ValueError("Unsupported fused checkpoint architecture/input/label contract")
     config = FusionConfig(**ck["fusion_config"])

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from models.raptor_v5_resnet50 import (
-    ConcatenationMLP, FusedCoAtNet, FusionConfig, RaptorClassifier,
+    BottleneckFusion, FusedCoAtNet, FusionConfig, RaptorClassifier,
     optimizer_groups,
 )
 
@@ -59,17 +59,44 @@ class FusionTests(unittest.TestCase):
         model = RaptorClassifier(backbone, 1024, drop=0.0)
         return model
 
-    def test_concat_order_and_zero_initialization(self):
-        mlp = ConcatenationMLP(2, 3, 3, 8)
+    def test_concat_order_separate_norms_and_zero_initialization(self):
+        fusion = BottleneckFusion(2, 3, 3, 8)
         a, b = torch.randn(2, 2, 4, 4), torch.randn(2, 3, 4, 4)
         seen = []
-        handle = mlp.mlp[0].register_forward_pre_hook(lambda m, args: seen.append(args[0]))
-        out = mlp(a, b)
+        handle = fusion.down.register_forward_pre_hook(lambda m, args: seen.append(args[0]))
+        out = fusion(a, b)
+        fusion(a, 100 * b)  # rescaling one input must not touch the other's half
         handle.remove()
-        torch.testing.assert_close(seen[0], torch.cat((a, b), 1).permute(0, 2, 3, 1))
+        expected = torch.cat((nn.functional.layer_norm(a.permute(0, 2, 3, 1), (2,)),
+                              nn.functional.layer_norm(b.permute(0, 2, 3, 1), (3,))), -1)
+        torch.testing.assert_close(seen[0], expected)
+        torch.testing.assert_close(seen[1][..., :2], seen[0][..., :2], rtol=0, atol=0)
         self.assertEqual(torch.count_nonzero(out).item(), 0)
-        self.assertGreater(torch.count_nonzero(mlp.mlp[1].weight).item(), 0)
+        self.assertGreater(torch.count_nonzero(fusion.down.weight).item(), 0)
+        self.assertGreater(torch.count_nonzero(fusion.dw.weight).item(), 0)
         self.assertEqual(out.shape, b.shape)
+
+    def test_depthwise_mixing_reaches_exactly_the_3x3_neighbourhood(self):
+        fusion = BottleneckFusion(6, 3, 4, 8).eval()
+        nn.init.normal_(fusion.up.weight)
+        a, b = torch.randn(1, 6, 7, 7), torch.randn(1, 3, 7, 7)
+        moved = a.clone()
+        # A non-constant change: a per-position LayerNorm removes constant shifts.
+        moved[0, :, 3, 3] = 3 * torch.randn(6)
+        with torch.no_grad():
+            changed = (fusion(moved, b) - fusion(a, b)).abs().sum(1)[0] > 1e-6
+        expected = torch.zeros(7, 7, dtype=torch.bool)
+        expected[2:5, 2:5] = True
+        self.assertTrue(torch.equal(changed, expected))
+
+    def test_default_fusion_sizes(self):
+        f1, f2 = BottleneckFusion(512, 256, 256, 128), BottleneckFusion(1024, 2048, 1024, 256)
+        count = lambda m: sum(p.numel() for p in m.parameters())
+        # LNs + 1x1 down + depthwise 3x3 + 1x1 up
+        self.assertEqual(count(f1), 1536 + 98432 + 1280 + 33024)      # 134,272
+        self.assertEqual(count(f2), 6144 + 786688 + 2560 + 263168)    # 1,058,560
+        config = FusionConfig()
+        self.assertEqual((config.stage2_hidden, config.stage4_hidden), (128, 256))
 
     def test_zero_residuals_preserve_parent_logits(self):
         model = self.make_model().eval()
@@ -95,7 +122,7 @@ class FusionTests(unittest.TestCase):
                                 for i in (1, 2, 3)]).reshape(1, 1, 3, 384, 384)
         # A nonzero correction must be visible in the *next* CoAtNet stage.
         with torch.no_grad():
-            bb.f1.mlp[-1].bias.fill_(0.25)
+            bb.f1.up.bias.fill_(0.25)
             model(triplets)
         for handle in handles:
             handle.remove()
@@ -114,7 +141,7 @@ class FusionTests(unittest.TestCase):
             bb.coatnet.norm.register_forward_pre_hook(lambda m, a: normalized_input.append(a[0])),
         ]
         with torch.no_grad():
-            bb.f2.mlp[-1].bias.fill_(0.5)
+            bb.f2.up.bias.fill_(0.5)
             feats = model.encode(torch.randn(2, 3, 3, 384, 384))
         for handle in handles:
             handle.remove()
@@ -136,13 +163,17 @@ class FusionTests(unittest.TestCase):
             optimizer.zero_grad(set_to_none=True)
             nn.functional.binary_cross_entropy_with_logits(model(x), torch.ones(1, 12)).backward()
             for fusion in (bb.f1, bb.f2):
-                self.assertGreater(fusion.mlp[-1].weight.grad.abs().sum().item(), 0)
+                self.assertGreater(fusion.up.weight.grad.abs().sum().item(), 0)
             if step == 0:
-                # Exact zero projections temporarily block gradients to ResNet50.
+                # Exact zero projections temporarily block gradients to ResNet50
+                # and to the fusion layers before the up projection.
                 self.assertEqual(bb.resnet50.conv3.weight.grad.abs().sum().item(), 0)
+                for fusion in (bb.f1, bb.f2):
+                    self.assertEqual(fusion.down.weight.grad.abs().sum().item(), 0)
+                    self.assertEqual(fusion.dw.weight.grad.abs().sum().item(), 0)
             else:
                 for module in (bb.coatnet.stem, bb.resnet50.conv3, bb.resnet50.conv5,
-                               bb.f1.mlp[1], bb.f2.mlp[1]):
+                               bb.f1.down, bb.f2.down, bb.f1.dw, bb.f2.dw):
                     self.assertGreater(module.weight.grad.abs().sum().item(), 0)
             optimizer.step()
 
@@ -165,7 +196,7 @@ class FusionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             optimizer_groups(model)
         with self.assertRaises(ValueError):
-            ConcatenationMLP(2, 3, 3, 8)(torch.ones(1, 2, 4, 4), torch.ones(1, 3, 2, 2))
+            BottleneckFusion(2, 3, 3, 8)(torch.ones(1, 2, 4, 4), torch.ones(1, 3, 2, 2))
 
 
 if __name__ == "__main__":

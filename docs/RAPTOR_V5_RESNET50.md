@@ -37,19 +37,27 @@ shared 3×384×384 triplet
                original Raptor per-finding attention-MIL head → 12 logits
 ```
 
-Both MLPs concatenate raw feature channels first, then apply per-position
-LayerNorm → Linear → GELU → Dropout → Linear → GELU → Dropout → Linear.
-F1 uses `768 → 1024 → 1024 → 256`; F2 uses
-`3072 → 2048 → 2048 → 1024`. Hidden sizes/dropout are configurable.
-The position-wise MLP preserves spatial information; neither feature map is
-globally pooled before fusion. Matching strides make interpolation unnecessary.
+Both fusion blocks are a Mix-FFN style bottleneck (`BottleneckFusion`):
+each input gets its own LayerNorm over channels, the two are concatenated,
+then 1×1 down-projection → depthwise 3×3 → GELU → Dropout → 1×1 up-projection.
+F1 uses `768 → 128 → 256` (≈0.13M parameters); F2 uses `3072 → 256 → 1024`
+(≈1.06M), ≈1.2M in total, versus ≈14.7M for the earlier three-layer MLP.
+Hidden sizes and dropout are configurable.
 
-Only the last linear's weight and bias start at zero. Therefore both residual
+Separate norms keep ResNet's post-ReLU features and CoAtNet's features on a
+comparable scale before mixing; one LayerNorm over the concatenation would let
+the larger-magnitude input dominate the shared statistics. The depthwise 3×3
+lets each output position use the fused features of its 3×3 neighbourhood,
+tolerating small misalignment between the two trunks' receptive fields.
+Neither feature map is globally pooled before fusion, and matching strides make
+interpolation unnecessary.
+
+Only the up-projection's weight and bias start at zero. Therefore both residual
 corrections are exactly zero initially, and the loaded Raptor predictions are
-preserved for the **same 384 input** in evaluation mode. Earlier MLP layers use
-normal random initialization, allowing the final projection to learn on the
-first backward pass. The zero output projections also mean ResNet50 and the
-earlier fusion layers receive zero loss gradients on the first backward pass;
+preserved for the **same 384 input** in evaluation mode. The down-projection
+and depthwise conv use normal random initialization, allowing the up-projection
+to learn on the first backward pass. The zero up-projections also mean ResNet50
+and the earlier fusion layers receive zero loss gradients on the first backward pass;
 their gradients open after the projections change. This is initialization
 behavior, not freezing. CoAtNet retains its original gradient path throughout.
 
@@ -98,8 +106,9 @@ including `fc.weight` and `fc.bias`; loading is strict before the average pool
 and classification head are removed. Missing or incompatible weights fail
 loading. `resnet50_weights=None` explicitly requests random weights for
 architecture tests only. Fused checkpoints have a separate
-`raptor_v5_resnet50_v1` format and `backbone.resnet50.*` keys; restoration loads
-the saved weights without downloading either parent.
+`raptor_v5_resnet50_v2` format and `backbone.resnet50.*` keys; restoration loads
+the saved weights without downloading either parent. Fused `v1` checkpoints,
+saved with the earlier three-layer MLP fusion, are rejected.
 
 All model parameters have `requires_grad=True`. The optimizer helper includes
 every parameter exactly once: CoAtNet and ResNet50 at `1e-5`, fusion and MIL
@@ -107,7 +116,7 @@ head at `1e-4`, with configurable rates. Calling `.train()` also trains both
 backbones' BatchNorm statistics. There is no frozen feature cache.
 
 `FusionConfig(gradient_checkpointing=True)` uses timm's CoAtNet block
-checkpointing and checkpoints the fusion MLPs. ResNet50 remains a normal
+checkpointing and checkpoints the fusion blocks. ResNet50 remains a normal
 trainable forward pass. Use a small bag/batch size appropriate for GPU memory.
 
 The self-contained `kaggle/raptor_v5_resnet50_fusion.ipynb` embeds the same

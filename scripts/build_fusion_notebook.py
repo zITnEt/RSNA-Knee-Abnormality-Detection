@@ -19,7 +19,9 @@ def main():
 
 Both unfrozen backbones receive the same preprocessed 384×384 adjacent-slice
 triplet. CoAtNet S2 uses `Z + F1(X,Z)`; S4 uses `V + F2(V,Y)`.
-Both MLP corrections initialize to exactly zero. The original Raptor MIL head
+Each fusion block is a small bottleneck (separate LayerNorms, 1×1 down,
+depthwise 3×3, GELU, 1×1 up; ≈1.2M parameters in total), and both
+corrections initialize to exactly zero. The original Raptor MIL head
 continues after CoAtNet pooling. This notebook builds the architecture and
 optimizer and a series-aware loader. Use this loader to train it; anonymous
 concatenated slice caches cannot enforce MRI series boundaries.
@@ -116,7 +118,7 @@ def train_step(triplets, targets):
     scaler.update()
     return float(loss.detach())
 
-# After training, preserve both trunks, both fusion MLPs, and the original head:
+# After training, preserve both trunks, both fusion blocks, and the original head:
 # checkpoint_data = fused_checkpoint(model)
 # checkpoint_data.update(optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), epoch=epoch)
 # torch.save(checkpoint_data, '/kaggle/working/raptor_v5_resnet50.pt')
