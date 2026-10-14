@@ -1,0 +1,14 @@
+{
+  "parent_file": "/home/User/rsna-resnet50-20261013/resnet50_cloud/assets/raptor_ft_coatnet_v5_full_swa.pt",
+  "parent_file_sha256": "20d45e0732a0e9120025d0172a4d2dd0170900bc250b06742dfb7ae08a63786a",
+  "parent_tensor_sha256": "aa6d6a13bda8f381c87b88eb41738f0bf1fba583e2696547b1605b2661cdbfb7",
+  "initial_parent_tensors_identical": true,
+  "differing_keys": [],
+  "zero_fusion_output_tensors": {
+    "backbone.f1.up.weight": true,
+    "backbone.f1.up.bias": true,
+    "backbone.f2.up.weight": true,
+    "backbone.f2.up.bias": true
+  },
+  "baseline_verified": true
+}

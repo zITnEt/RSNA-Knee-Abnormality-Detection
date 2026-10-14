@@ -1,0 +1,24 @@
+[
+  {
+    "role": "training_script",
+    "worktree_file": "scripts/train_resnet50_cloud.py",
+    "cloud_file": "audit/resnet50_run/scripts/train_resnet50_cloud.py",
+    "worktree_sha256": "092b9ffc3b8d3a6a2d6d7ea5c9587e5d9a799ef40eb6c1c47bba84a816c0688b",
+    "cloud_sha256": "092b9ffc3b8d3a6a2d6d7ea5c9587e5d9a799ef40eb6c1c47bba84a816c0688b",
+    "byte_identical": true
+  },
+  {
+    "role": "model",
+    "worktree_file": "models/raptor_v5_resnet50.py",
+    "cloud_file": "audit/resnet50_run/models/raptor_v5_resnet50.py",
+    "worktree_sha256": "1d38d446cc2146525510ac88dd8015aa22484a886b00b66587c729ff800689d1",
+    "cloud_sha256": "1d38d446cc2146525510ac88dd8015aa22484a886b00b66587c729ff800689d1",
+    "byte_identical": true
+  },
+  {
+    "role": "architecture_notebook",
+    "file": "kaggle/raptor_v5_resnet50_fusion.ipynb",
+    "sha256": "990442122b0898f62641dcb446a5326ee0b812b1f78fdc9c0c999bfc43a31f01",
+    "note": "Read as architecture reference; actual campaign config/trainer supersede its loader example."
+  }
+]
