@@ -1,0 +1,17 @@
+[Unit]
+Description=RSNA ResNet50 full 4333-study four-epoch Gold74 training
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=User
+WorkingDirectory=/home/User/rsna-resnet50-20261013/resnet50_cloud
+ExecStart=/bin/bash /home/User/rsna-resnet50-20261013/resnet50_cloud/scripts/launch_resnet50_full_gold4.sh
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

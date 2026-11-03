@@ -1,0 +1,16 @@
+[Unit]
+Description=RSNA Raptor ResNet50 five-fold cross-validation
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=User
+WorkingDirectory=/home/User/rsna-resnet50-20261013/resnet50_cloud
+ExecStart=/bin/bash /home/User/rsna-resnet50-20261013/resnet50_cloud/scripts/launch_resnet50_cv5.sh
+Restart=on-failure
+RestartSec=120
+
+[Install]
+WantedBy=multi-user.target

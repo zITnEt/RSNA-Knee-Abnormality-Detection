@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.md whitespace=-blank-at-eol
+# These recorded fold files have a byte-level hash enforced by the CV trainer.
+configs/cv5_folds.csv -text -whitespace
+experiments/resnet50_fusion/configs/cv5_folds.csv -text -whitespace

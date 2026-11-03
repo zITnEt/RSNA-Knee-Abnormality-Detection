@@ -1,11 +1,23 @@
-# Secrets
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
 .kaggle/
 kaggle.json
 *.token
+*.pem
+*.key
+credentials*.json
+service-account*.json
 
-# Competition data and model artifacts
+# Medical data, model assets, and generated training products
 data/
 datasets/
+labels/
+checkpoints/
+run/
+runs/
+expected_manifests/
 *.dcm
 *.dicom
 *.pt
@@ -14,21 +26,25 @@ datasets/
 *.safetensors
 *.bin
 *.npz
+*.npy
+*.h5
+*.tar
+*.tar.gz
+*.zip
 
-# Generated caches and environments
-__pycache__/
-*.py[cod]
+# Local environments and tool state
 .venv/
 venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .ipynb_checkpoints/
 .cache/
+.runtime*/
+.worktrees/
 audit/
-
-# Keep the validated baseline CSV once produced.
-results/dinosaur_v5_baseline/*
-!results/dinosaur_v5_baseline/.gitkeep
-!results/dinosaur_v5_baseline/submission.csv
-!results/dinosaur_v5_baseline/submission_validation.txt
-!results/dinosaur_v5_baseline/run_metadata.json
-!results/dinosaur_v5_baseline/environment.txt
-!results/dinosaur_v5_baseline/reproduction_notes.md
+*.log
+*.pid
+demo-output/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,26 @@
+{
+  "id": "zafarnematov/rsna-fusion-cv5-submit",
+  "title": "RSNA Fusion Cv5 Submit",
+  "code_file": "rsna-fusion-cv5-submit.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [
+    "mattiaangeli/rsna-knee-coatnet-d4-depthzone-swa3-b2"
+  ],
+  "kernel_sources": [
+    "zafarnematov/rsna-fusion-cv5-f01",
+    "zafarnematov/rsna-fusion-cv5-f23",
+    "zafarnematov/rsna-fusion-cv5-f4"
+  ],
+  "competition_sources": [
+    "rsna-knee-abnormality-detection"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:2757e0c7d1e0a9cb43da657b97e223c321a98f5014bdf64f44f2f6b083ad2b2f",
+  "machine_shape": "NvidiaTeslaT4"
+}

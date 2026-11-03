@@ -1,0 +1,14 @@
+[Unit]
+Description=Resume RSNA ResNet50 V2 training until ten epochs complete
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=User
+WorkingDirectory=/home/User
+ExecStart=/bin/bash /home/User/rsna-resnet50-20261013/watch_resnet50_cloud.sh
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
